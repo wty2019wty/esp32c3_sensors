@@ -24,6 +24,8 @@
 
 #include "bmp280.h"
 #include "i2c_config.h"
+#include "imu_bias_calib.h"
+#include "imu_filter.h"
 #include "mahony.h"
 #include "mpu9250.h"
 #include "sht40.h"
@@ -36,10 +38,12 @@ static const char *TAG = "main";
 #define I2C_TIMEOUT_MS          100             /* 所有 I2C 操作超时 */
 #define I2C_GLITCH_IGNORE_CNT   7               /* 典型滤波值 */
 
-#define SENSOR_TASK_PRIORITY    5
+#define SENSOR_TASK_PRIORITY    4
+#define IMU_TASK_PRIORITY       5
 #define DISPLAY_TASK_PRIORITY   3
 #define TASK_STACK_SIZE         4096
-#define SENSOR_PERIOD_MS        50              /* 采样周期：50ms（20Hz） */
+#define SENSOR_PERIOD_MS        50              /* 温湿度/气压采样周期：50ms（20Hz） */
+#define IMU_PERIOD_MS           10              /* IMU 采样周期：10ms（100Hz，对齐 MPU ODR） */
 #define DISPLAY_PERIOD_MS       20              /* 刷新周期：20ms（约 50 FPS，脏页刷新） */
 
 #define I2C_DEV_COUNT           4
@@ -49,7 +53,13 @@ static const char *TAG = "main";
 #define I2C_ADDR_BMP280         0x76
 
 #define MAHONY_KP               1.0f
-#define MAHONY_KI               0.0f
+#define MAHONY_KI               0.0005f
+
+/* IMU 前端滤波与零偏校准（移植自 stm32f103 提高陀螺仪精度的方案） */
+#define IMU_SAMPLE_HZ           (1000.0f / IMU_PERIOD_MS)  /* 100Hz */
+#define IMU_ACCEL_CUTOFF_HZ     30.0f           /* 加速度二阶低通截止频率 */
+#define IMU_GYRO_CUTOFF_HZ      25.0f           /* 陀螺仪二阶低通截止频率 */
+#define IMU_FILTER_WARMUP       200             /* 滤波器预热帧数（100Hz 下约 2s） */
 
 #define DISPLAY_COLS            21
 #define DISPLAY_ROWS            8
@@ -78,6 +88,7 @@ typedef struct {
     float mag_x, mag_y, mag_z;      /* μT */
     float roll, pitch, yaw;         /* ° */
     bool  mpu9250_valid;
+    bool  imu_calibrated;           /* 陀螺零偏校准是否完成 */
 
     /* 系统 */
     uint32_t uptime_sec;
@@ -273,10 +284,12 @@ static void display_render(const sensor_data_t *d)
     }
     ssd1315_draw_string(&s_oled, 4, 0, line);
 
-    /* Line 5: Mahony 姿态角 */
-    if (d->mpu9250_valid) {
+    /* Line 5: Mahony 姿态角（校准期间显示 CAL） */
+    if (d->mpu9250_valid && d->imu_calibrated) {
         snprintf(line, sizeof(line), "R:%.1f P:%.1f Y:%.1f",
                  (double)d->roll, (double)d->pitch, (double)d->yaw);
+    } else if (d->mpu9250_valid) {
+        snprintf(line, sizeof(line), "R:--- P:--- Y:--- CAL");
     } else {
         snprintf(line, sizeof(line), "R:--- P:--- Y:---");
     }
@@ -314,16 +327,91 @@ static void display_render(const sensor_data_t *d)
 /* ---------------- 任务 ---------------- */
 
 /**
- * @brief 传感器采集任务：每 100ms 读取全部传感器并写入全局结构
+ * @brief IMU 任务：100Hz 读取 MPU9250，经 二阶低通滤波 -> 零偏校准/跟踪 -> Mahony 融合
+ *
+ * 该流水线移植自 stm32f103 工程提高陀螺仪精度的方案：
+ *   1) imu_filter        抑制高频噪声，稳定陀螺积分；
+ *   2) imu_bias_calib    上电静止校准 + 运行期静止零偏跟踪，消除陀螺漂移；
+ *   3) mahony_update     四元数姿态融合，输出 Roll/Pitch/Yaw。
  */
-static void sensor_task(void *arg)
+static void imu_task(void *arg)
 {
     (void)arg;
 
     mahony_t ahrs;
     mahony_init(&ahrs, MAHONY_KP, MAHONY_KI);
 
+    imu_filter_t filter;
+    imu_filter_init(&filter, IMU_SAMPLE_HZ,
+                    IMU_ACCEL_CUTOFF_HZ, IMU_GYRO_CUTOFF_HZ, IMU_FILTER_WARMUP);
+
+    imu_bias_calib_t calib;
+    imu_bias_calib_init(&calib);
+
     int64_t last_us = esp_timer_get_time();
+
+    while (1) {
+        mpu9250_sample_t raw;
+        memset(&raw, 0, sizeof(raw));
+        bool mpu_ok = (mpu9250_read(&s_mpu, &raw) == ESP_OK);
+
+        if (!mpu_ok) {
+            (void)i2c_master_bus_reset(s_bus);
+        }
+
+        /* 计算实际采样间隔（补偿调度抖动） */
+        int64_t now_us = esp_timer_get_time();
+        float dt = (float)(now_us - last_us) / 1000000.0f;
+        last_us = now_us;
+        if (dt <= 0.0f || dt > 0.5f) {
+            dt = (float)IMU_PERIOD_MS / 1000.0f;
+        }
+
+        mpu9250_sample_t filtered = raw;
+        mpu9250_sample_t fused_in = raw;
+
+        if (mpu_ok) {
+            imu_filter_process(&raw, &filtered, &filter);
+            imu_bias_calib_update(&calib, &filtered, &fused_in);
+            mahony_update(&ahrs,
+                          fused_in.gyro_x, fused_in.gyro_y, fused_in.gyro_z,
+                          fused_in.acc_x, fused_in.acc_y, fused_in.acc_z,
+                          fused_in.mag_x, fused_in.mag_y, fused_in.mag_z,
+                          dt);
+        }
+
+        float roll = 0.0f, pitch = 0.0f, yaw = 0.0f;
+        mahony_get_euler(&ahrs, &roll, &pitch, &yaw);
+
+        xSemaphoreTake(s_data_mutex, portMAX_DELAY);
+        if (mpu_ok) {
+            s_data.acc_x = fused_in.acc_x;
+            s_data.acc_y = fused_in.acc_y;
+            s_data.acc_z = fused_in.acc_z;
+            s_data.gyro_x = fused_in.gyro_x;
+            s_data.gyro_y = fused_in.gyro_y;
+            s_data.gyro_z = fused_in.gyro_z;
+            s_data.mag_x = fused_in.mag_x;
+            s_data.mag_y = fused_in.mag_y;
+            s_data.mag_z = fused_in.mag_z;
+            s_data.roll = roll;
+            s_data.pitch = pitch;
+            s_data.yaw = yaw;
+        }
+        s_data.mpu9250_valid = mpu_ok;
+        s_data.imu_calibrated = imu_bias_calib_is_done(&calib);
+        xSemaphoreGive(s_data_mutex);
+
+        vTaskDelay(pdMS_TO_TICKS(IMU_PERIOD_MS));
+    }
+}
+
+/**
+ * @brief 环境传感器任务：每 50ms 读取 SHT40 与 BMP280，并更新系统信息
+ */
+static void sensor_task(void *arg)
+{
+    (void)arg;
 
     while (1) {
         /* SHT40 */
@@ -335,35 +423,12 @@ static void sensor_task(void *arg)
         int32_t t_fine = 0;
         bool bmp_ok = (bmp280_read(&s_bmp, &bmp_t, &bmp_p, &bmp_a, &t_fine) == ESP_OK);
 
-        /* MPU9250（加速度 + 陀螺仪 + 磁力计） */
-        mpu9250_sample_t sample;
-        memset(&sample, 0, sizeof(sample));
-        bool mpu_ok = (mpu9250_read(&s_mpu, &sample) == ESP_OK);
-
         /* 任一读取失败时复位总线，释放可能被拉低的 SDA */
-        if (!sht_ok || !bmp_ok || !mpu_ok) {
+        if (!sht_ok || !bmp_ok) {
             (void)i2c_master_bus_reset(s_bus);
         }
 
-        /* 计算采样间隔 */
         int64_t now_us = esp_timer_get_time();
-        float dt = (float)(now_us - last_us) / 1000000.0f;
-        last_us = now_us;
-        if (dt <= 0.0f || dt > 1.0f) {
-            dt = (float)SENSOR_PERIOD_MS / 1000.0f;
-        }
-
-        /* 姿态融合（仅在 IMU 读取成功时更新） */
-        if (mpu_ok) {
-            mahony_update(&ahrs,
-                          sample.gyro_x, sample.gyro_y, sample.gyro_z,
-                          sample.acc_x, sample.acc_y, sample.acc_z,
-                          sample.mag_x, sample.mag_y, sample.mag_z,
-                          dt);
-        }
-
-        float roll = 0.0f, pitch = 0.0f, yaw = 0.0f;
-        mahony_get_euler(&ahrs, &roll, &pitch, &yaw);
 
         /* 加锁写入全局数据 */
         xSemaphoreTake(s_data_mutex, portMAX_DELAY);
@@ -377,23 +442,6 @@ static void sensor_task(void *arg)
         s_data.bmp280_alt = bmp_a;
         s_data.t_fine = t_fine;
         s_data.bmp280_valid = bmp_ok;
-
-        if (mpu_ok) {
-            s_data.acc_x = sample.acc_x;
-            s_data.acc_y = sample.acc_y;
-            s_data.acc_z = sample.acc_z;
-            s_data.gyro_x = sample.gyro_x;
-            s_data.gyro_y = sample.gyro_y;
-            s_data.gyro_z = sample.gyro_z;
-            s_data.mag_x = sample.mag_x;
-            s_data.mag_y = sample.mag_y;
-            s_data.mag_z = sample.mag_z;
-        }
-        s_data.mpu9250_valid = mpu_ok;
-
-        s_data.roll = roll;
-        s_data.pitch = pitch;
-        s_data.yaw = yaw;
 
         s_data.uptime_sec = (uint32_t)(now_us / 1000000);
         s_data.heap_free_kb = esp_get_free_heap_size() / 1024u;
@@ -505,6 +553,12 @@ void app_main(void)
 
     /* 3. 创建任务 */
     BaseType_t ok;
+    ok = xTaskCreate(imu_task, "imu_task", TASK_STACK_SIZE, NULL,
+                     IMU_TASK_PRIORITY, NULL);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "imu_task 创建失败");
+        return;
+    }
     ok = xTaskCreate(sensor_task, "sensor_task", TASK_STACK_SIZE, NULL,
                      SENSOR_TASK_PRIORITY, NULL);
     if (ok != pdPASS) {
@@ -518,6 +572,6 @@ void app_main(void)
         return;
     }
 
-    ESP_LOGI(TAG, "任务已启动：sensor_task(prio %d) / display_task(prio %d)",
-             SENSOR_TASK_PRIORITY, DISPLAY_TASK_PRIORITY);
+    ESP_LOGI(TAG, "任务已启动：imu_task(prio %d, %dHz) / sensor_task(prio %d) / display_task(prio %d)",
+             IMU_TASK_PRIORITY, (int)IMU_SAMPLE_HZ, SENSOR_TASK_PRIORITY, DISPLAY_TASK_PRIORITY);
 }
