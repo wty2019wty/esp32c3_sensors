@@ -18,9 +18,8 @@
 #define I2C_SCL_GPIO            GPIO_NUM_9
 
 /* SCL 频率：
- *   400000  -> 任务书要求
- *   100000  -> 若 400kHz 不稳定可临时降速排查
- *   10000   -> 极端诊断用
+ *   400000  -> MPU-9250 数据手册规定最高 400kHz (Fast-mode)
+ *   100000  -> 排查用
  */
 #define I2C_SCL_SPEED_HZ        400000
 

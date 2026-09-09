@@ -29,16 +29,30 @@
 
 /* AK8963 寄存器 */
 #define AK8963_REG_WIA                  0x00    /* 器件 ID，期望 0x48 */
-#define AK8963_REG_ST1                  0x02    /* 数据就绪标志 */
-#define AK8963_REG_HXL                  0x03    /* 0x03~0x08 磁力计数据 */
-#define AK8963_REG_ST2                  0x09    /* 溢出标志 */
+#define AK8963_REG_ST1                  0x02    /* bit0=DRDY 数据就绪 */
+#define AK8963_REG_HXL                  0x03    /* 0x03~0x08 磁力计数据（小端序，L 在前） */
+#define AK8963_REG_ST2                  0x09    /* bit3=HOFL 溢出 */
 #define AK8963_REG_CNTL1                0x0A    /* 工作模式 */
-#define AK8963_REG_ASAX                 0x10    /* 灵敏度调整起始 */
+#define AK8963_REG_CNTL2                0x0B    /* bit0=SRST 软复位 */
+#define AK8963_REG_ASTC                 0x0C    /* 自检 */
+#define AK8963_REG_I2CDIS               0x0F    /* 禁用 I2C */
+#define AK8963_REG_ASAX                 0x10    /* Fuse ROM 灵敏度调整起始 */
 
-/* WHOAMI 期望值 */
-#define MPU9250_WHOAMI_MPU9250          0x71
-#define MPU9250_WHOAMI_MPU9255          0x73
-#define MPU9250_WHOAMI_MPU6500          0x70    /* GY-91 常见实际芯片 */
+/* AK8963 CNTL1 值 */
+#define AK8963_CNTL1_POWER_DOWN         0x00    /* 掉电模式 */
+#define AK8963_CNTL1_FUSE_ROM           0x0F    /* Fuse ROM 访问模式（读出厂校准） */
+#define AK8963_CNTL2_SRST               0x01    /* 软复位 */
+
+/* AK8963 ST1/ST2 位定义 */
+#define AK8963_ST1_DRDY                 0x01u   /* 数据就绪 */
+#define AK8963_ST2_HOFL                 0x08u   /* 磁力计测量溢出 */
+
+/* WHOAMI 期望值（参考数据手册 PS-MPU-9250A-01 Rev1.1）
+ * 注意：0x71/0x73 才内置 AK8963 磁力计；0x70 是 MPU6500（无磁力计，
+ * 市面上常见被抹丝印冒充 MPU9250 的翻新货）。 */
+#define MPU9250_WHOAMI_MPU9250          0x71    /* 正品 MPU-9250，含 AK8963 */
+#define MPU9250_WHOAMI_MPU9255          0x73    /* MPU-9255，含 AK8963 */
+#define MPU9250_WHOAMI_MPU6500          0x70    /* MPU-6500，无磁力计 */
 #define AK8963_WIA_ID                   0x48
 
 /* 寄存器写入值 */
@@ -56,14 +70,16 @@
  * 为与 0.15 uT/LSB 灵敏度匹配，此处使用 0x16。 */
 #define AK8963_CNTL1_CONT_MODE2_16BIT   0x16
 
-/* 灵敏度换算 */
+/* 灵敏度换算。
+ * 磁场读数 = 原始 LSB * (0.15 uT/LSB) * (Fuse ROM 每轴调整值)。
+ * 参考：AK8963 手册，(adj-128)/256 + 1 为出厂灵敏度修正系数。 */
 #define MPU9250_ACCEL_LSB_PER_G         8192.0f     /* ±4g  */
 #define MPU9250_GYRO_LSB_PER_DPS        16.384f     /* ±2000dps */
 #define MPU9250_MAG_UT_PER_LSB          0.15f       /* 16 位输出 */
 
 /* 数据长度 */
 #define MPU9250_AXIS_BYTES              6           /* 三轴各 2 字节 */
-#define AK8963_BURST_BYTES              8           /* ST1 + 6 数据 + ST2 */
+#define AK8963_BURST_BYTES              7           /* HXL..HZH + ST2（小端序） */
 
 /* I2C 操作超时（毫秒） */
 #define MPU9250_I2C_TIMEOUT_MS          100
@@ -74,6 +90,7 @@
 typedef struct {
     i2c_master_dev_handle_t dev;        /* 0x68：加速度计/陀螺仪 */
     i2c_master_dev_handle_t mag_dev;    /* 0x0C：AK8963 磁力计 */
+    float mag_adj[3];                   /* Fuse ROM 每轴灵敏度调整值 */
     bool present;                       /* MPU9250 是否在线 */
     bool mag_present;                   /* AK8963 是否在线 */
 } mpu9250_t;

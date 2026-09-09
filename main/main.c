@@ -39,8 +39,8 @@ static const char *TAG = "main";
 #define SENSOR_TASK_PRIORITY    5
 #define DISPLAY_TASK_PRIORITY   3
 #define TASK_STACK_SIZE         4096
-#define SENSOR_PERIOD_MS        100
-#define DISPLAY_PERIOD_MS       1000
+#define SENSOR_PERIOD_MS        50              /* 采样周期：50ms（20Hz） */
+#define DISPLAY_PERIOD_MS       20              /* 刷新周期：20ms（约 50 FPS，脏页刷新） */
 
 #define I2C_DEV_COUNT           4
 #define I2C_ADDR_OLED           0x3C
@@ -405,7 +405,7 @@ static void sensor_task(void *arg)
 }
 
 /**
- * @brief 显示任务：每 1s 刷新一次 OLED
+ * @brief 显示任务：按 DISPLAY_PERIOD_MS 周期刷新 OLED（默认 100ms）
  */
 static void display_task(void *arg)
 {

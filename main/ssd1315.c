@@ -109,6 +109,8 @@ esp_err_t ssd1315_init(ssd1315_t *oled, i2c_master_bus_handle_t bus)
 
     oled->present = true;
     ssd1315_clear(oled);
+    /* 影子缓冲置为不可能值，强制首次全屏刷新 */
+    memset(oled->shadow, 0xFF, sizeof(oled->shadow));
     err = ssd1315_flush(oled);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "SSD1315 清屏失败: %s", esp_err_to_name(err));
@@ -165,20 +167,41 @@ esp_err_t ssd1315_flush(ssd1315_t *oled)
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t err;
+    /* 脏页刷新：仅发送内容变化的页；全部未变则直接返回，不占用总线 */
+    for (uint8_t page = 0; page < SSD1315_PAGES; page++) {
+        size_t off = (size_t)page * SSD1315_WIDTH;
+        if (memcmp(&oled->buf[off], &oled->shadow[off], SSD1315_WIDTH) == 0) {
+            continue;
+        }
 
-    /* 水平寻址：列 0~127 */
-    err = ssd1315_send_cmd(oled, 0x21);
-    if (err == ESP_OK) err = ssd1315_send_cmd(oled, 0x00);
-    if (err == ESP_OK) err = ssd1315_send_cmd(oled, 0x7F);
-    /* 页 0~7 */
-    if (err == ESP_OK) err = ssd1315_send_cmd(oled, 0x22);
-    if (err == ESP_OK) err = ssd1315_send_cmd(oled, 0x00);
-    if (err == ESP_OK) err = ssd1315_send_cmd(oled, 0x07);
-    if (err != ESP_OK) {
-        return err;
+        /* 水平寻址下用 0x21/0x22 设置本页窗口：列 0~127，页 page~page */
+        esp_err_t err = ssd1315_send_cmd(oled, 0x21);
+        if (err == ESP_OK) {
+            err = ssd1315_send_cmd(oled, 0x00);
+        }
+        if (err == ESP_OK) {
+            err = ssd1315_send_cmd(oled, 0x7F);
+        }
+        if (err == ESP_OK) {
+            err = ssd1315_send_cmd(oled, 0x22);
+        }
+        if (err == ESP_OK) {
+            err = ssd1315_send_cmd(oled, page);
+        }
+        if (err == ESP_OK) {
+            err = ssd1315_send_cmd(oled, page);
+        }
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        err = ssd1315_send_data(oled, &oled->buf[off], SSD1315_WIDTH);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        memcpy(&oled->shadow[off], &oled->buf[off], SSD1315_WIDTH);
     }
 
-    /* 一次性发送整帧 1024 字节 */
-    return ssd1315_send_data(oled, oled->buf, SSD1315_BUF_SIZE);
+    return ESP_OK;
 }

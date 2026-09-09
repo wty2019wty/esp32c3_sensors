@@ -76,8 +76,45 @@ static esp_err_t mpu9250_init_mag(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    /* 软复位后进入连续测量模式 2（100Hz，16 位输出） */
-    (void)mag_write_reg(mpu, AK8963_REG_CNTL1, 0x00);   /* 先进入 power-down */
+    /* WIA 校验通过后：软复位 -> 掉电 -> 进 Fuse ROM 读出厂灵敏度调整值 */
+    err = mag_write_reg(mpu, AK8963_REG_CNTL2, AK8963_CNTL2_SRST);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "AK8963 软复位失败: %s", esp_err_to_name(err));
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    err = mag_write_reg(mpu, AK8963_REG_CNTL1, AK8963_CNTL1_POWER_DOWN);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "AK8963 掉电失败: %s", esp_err_to_name(err));
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    /* 进 Fuse ROM 模式，读出厂灵敏度调整值 */
+    err = mag_write_reg(mpu, AK8963_REG_CNTL1, AK8963_CNTL1_FUSE_ROM);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "AK8963 进入 Fuse ROM 失败: %s", esp_err_to_name(err));
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    uint8_t asa[3] = {0};
+    err = mag_read_regs(mpu, AK8963_REG_ASAX, asa, sizeof(asa));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "读取 AK8963 Fuse ROM 失败: %s", esp_err_to_name(err));
+        return err;
+    }
+    mpu->mag_adj[0] = (float)(asa[0] - 128) / 256.0f + 1.0f;
+    mpu->mag_adj[1] = (float)(asa[1] - 128) / 256.0f + 1.0f;
+    mpu->mag_adj[2] = (float)(asa[2] - 128) / 256.0f + 1.0f;
+
+    /* 返回掉电，再进入连续测量模式 2（100Hz，16 位输出） */
+    err = mag_write_reg(mpu, AK8963_REG_CNTL1, AK8963_CNTL1_POWER_DOWN);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "AK8963 掉电失败: %s", esp_err_to_name(err));
+        return err;
+    }
     vTaskDelay(pdMS_TO_TICKS(10));
     err = mag_write_reg(mpu, AK8963_REG_CNTL1, AK8963_CNTL1_CONT_MODE2_16BIT);
     if (err != ESP_OK) {
@@ -87,7 +124,8 @@ static esp_err_t mpu9250_init_mag(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
     vTaskDelay(pdMS_TO_TICKS(10));
 
     mpu->mag_present = true;
-    ESP_LOGI(TAG, "AK8963 初始化成功 (0x%02X), WIA=0x%02X", AK8963_I2C_ADDR, wia);
+    ESP_LOGI(TAG, "AK8963 初始化成功 (0x%02X), WIA=0x%02X, ASA=[%d %d %d]",
+             AK8963_I2C_ADDR, wia, asa[0], asa[1], asa[2]);
     return ESP_OK;
 }
 
@@ -138,15 +176,21 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
         return ESP_ERR_INVALID_RESPONSE;
     }
 
+    /* 仅 0x71/0x73 内置 AK8963 磁力计；0x70 为 MPU6500，退化为六轴 */
+    const bool has_mag = (who == MPU9250_WHOAMI_MPU9250 || who == MPU9250_WHOAMI_MPU9255);
+    if (!has_mag) {
+        ESP_LOGW(TAG, "检测到 MPU6500 (WHOAMI=0x70)：无 AK8963 磁力计，退化为六轴 IMU");
+    }
+
     /* 软复位 -> 唤醒（PLL 陀螺 X 参考） */
     (void)mpu_write_reg(mpu, MPU9250_REG_PWR_MGMT_1, MPU9250_PWR_MGMT_1_RESET);
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(100));  /* 数据手册要求软复位后 ≥50ms */
     err = mpu_write_reg(mpu, MPU9250_REG_PWR_MGMT_1, MPU9250_PWR_MGMT_1_WAKE_PLL);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "唤醒 MPU9250 失败: %s", esp_err_to_name(err));
         return err;
     }
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(50));  /* 唤醒后稳定时间 */
 
     /* 采样率与量程配置 */
     (void)mpu_write_reg(mpu, MPU9250_REG_SMPLRT_DIV, MPU9250_SMPLRT_DIV_100HZ);
@@ -163,19 +207,45 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
     }
 
     /* 关闭内部 I2C 主机并打开 Bypass，使 AK8963 直接挂在总线上 */
-    (void)mpu_write_reg(mpu, MPU9250_REG_USER_CTRL, MPU9250_USER_CTRL_I2C_MST_OFF);
+    err = mpu_write_reg(mpu, MPU9250_REG_USER_CTRL, MPU9250_USER_CTRL_I2C_MST_OFF);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "关闭 I2C Master 失败: %s", esp_err_to_name(err));
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+    
     err = mpu_write_reg(mpu, MPU9250_REG_INT_PIN_CFG, MPU9250_INT_PIN_CFG_BYPASS);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "配置 I2C Bypass 失败: %s", esp_err_to_name(err));
         return err;
     }
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(100));  /* 旁路模式稳定 + AK8963 上电时间 */
+    
+    /* 调试：读回寄存器验证写入 */
+    uint8_t user_ctrl = 0, int_pin_cfg = 0;
+    (void)mpu_read_regs(mpu, MPU9250_REG_USER_CTRL, &user_ctrl, 1);
+    (void)mpu_read_regs(mpu, MPU9250_REG_INT_PIN_CFG, &int_pin_cfg, 1);
+    ESP_LOGI(TAG, "寄存器验证: USER_CTRL=0x%02X, INT_PIN_CFG=0x%02X", user_ctrl, int_pin_cfg);
+    if ((int_pin_cfg & 0x02) == 0) {
+        ESP_LOGW(TAG, "警告: BYPASS_EN 位未设置成功!");
+    }
 
     mpu->present = true;
     ESP_LOGI(TAG, "MPU9250 初始化成功 (0x%02X), WHOAMI=0x%02X", used_addr, who);
 
-    /* 磁力计为可选，失败不影响 IMU 主体 */
-    (void)mpu9250_init_mag(mpu, bus);
+    /* 磁力计为可选，失败不影响 IMU 主体；MPU6500 无磁力计直接跳过 */
+    if (has_mag) {
+        (void)mpu9250_init_mag(mpu, bus);
+    } else {
+        /* 诊断：旁路后探测常见磁力计地址（AK8963/QMC5883L/HMC5883L），
+         * 用于判断山寨板是否外挂了独立磁力计。 */
+        static const uint8_t mag_probe[] = {0x0C, 0x0D, 0x1E};
+        for (size_t i = 0; i < sizeof(mag_probe); i++) {
+            if (i2c_master_probe(bus, mag_probe[i], MPU9250_I2C_TIMEOUT_MS) == ESP_OK) {
+                ESP_LOGW(TAG, "旁路上发现疑似磁力计: 0x%02X（需另行适配）", mag_probe[i]);
+            }
+        }
+    }
     return ESP_OK;
 }
 
@@ -183,25 +253,43 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
 
 static esp_err_t mpu9250_read_mag(mpu9250_t *mpu, mpu9250_sample_t *s)
 {
-    /* 一次性读取 ST1(0x02) + 6 字节数据 + ST2(0x09) */
+    /* 等待数据就绪（DRDY=ST1 bit0），最多约 15ms。
+     * 100Hz 连续模式下新数据每 10ms 一个，读到旧/混合数据的概率极低。 */
+    esp_err_t err;
+    uint8_t st1 = 0;
+    for (int i = 0; i < 15; i++) {
+        err = mag_read_regs(mpu, AK8963_REG_ST1, &st1, 1);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if ((st1 & AK8963_ST1_DRDY) != 0u) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if ((st1 & AK8963_ST1_DRDY) == 0u) {
+        return ESP_ERR_TIMEOUT;  /* 15ms 内无新数据 */
+    }
+
+    /* 数据小端序：HXL(0x03)..HZH(0x08) + ST2(0x09)，一次突发读 7 字节 */
     uint8_t d[AK8963_BURST_BYTES] = {0};
-    esp_err_t err = mag_read_regs(mpu, AK8963_REG_ST1, d, sizeof(d));
+    err = mag_read_regs(mpu, AK8963_REG_HXL, d, sizeof(d));
     if (err != ESP_OK) {
         return err;
     }
 
     /* ST2 bit3 = HOFL，磁力计溢出时数据不可信 */
-    if ((d[7] & 0x08u) != 0u) {
+    if ((d[6] & AK8963_ST2_HOFL) != 0u) {
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    int16_t mx = (int16_t)(((uint16_t)d[2] << 8) | d[1]);
-    int16_t my = (int16_t)(((uint16_t)d[4] << 8) | d[3]);
-    int16_t mz = (int16_t)(((uint16_t)d[6] << 8) | d[5]);
+    int16_t mx = (int16_t)(((uint16_t)d[1] << 8) | d[0]);
+    int16_t my = (int16_t)(((uint16_t)d[3] << 8) | d[2]);
+    int16_t mz = (int16_t)(((uint16_t)d[5] << 8) | d[4]);
 
-    s->mag_x = (float)mx * MPU9250_MAG_UT_PER_LSB;
-    s->mag_y = (float)my * MPU9250_MAG_UT_PER_LSB;
-    s->mag_z = (float)mz * MPU9250_MAG_UT_PER_LSB;
+    s->mag_x = (float)mx * MPU9250_MAG_UT_PER_LSB * mpu->mag_adj[0];
+    s->mag_y = (float)my * MPU9250_MAG_UT_PER_LSB * mpu->mag_adj[1];
+    s->mag_z = (float)mz * MPU9250_MAG_UT_PER_LSB * mpu->mag_adj[2];
     return ESP_OK;
 }
 
