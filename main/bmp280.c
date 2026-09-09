@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "i2c_config.h"
 
 static const char *TAG = "bmp280";
 
@@ -72,7 +73,7 @@ esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus)
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = BMP280_I2C_ADDR,
-        .scl_speed_hz = 400000,
+        .scl_speed_hz = I2C_SCL_SPEED_HZ,
     };
     err = i2c_master_bus_add_device(bus, &dev_cfg, &bmp->dev);
     if (err != ESP_OK) {

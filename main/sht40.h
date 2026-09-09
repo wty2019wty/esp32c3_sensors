@@ -11,8 +11,9 @@
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 
-/* I2C 从机地址（SHT4x 固定为 0x44） */
+/* I2C 从机地址（SHT4x 默认 0x44，ADDR 引脚拉高时为 0x45） */
 #define SHT40_I2C_ADDR              0x44
+#define SHT40_I2C_ADDR_ALT          0x45
 
 /* 命令：高精度测量（Datasheet Table 9，命令 0xFD） */
 #define SHT40_CMD_MEASURE_HIGH_PREC 0xFD

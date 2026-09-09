@@ -10,8 +10,9 @@
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 
-/* I2C 从机地址 */
+/* I2C 从机地址（常见 0x3C，部分模块为 0x3D） */
 #define SSD1315_I2C_ADDR        0x3C
+#define SSD1315_I2C_ADDR_ALT    0x3D
 
 /* 屏幕尺寸 */
 #define SSD1315_WIDTH           128
@@ -28,8 +29,8 @@
 #define SSD1315_CTRL_CMD        0x00
 #define SSD1315_CTRL_DATA       0x40
 
-/* I2C 操作超时（毫秒） */
-#define SSD1315_I2C_TIMEOUT_MS  100
+/* I2C 操作超时（毫秒）：OLED 整帧写入较慢，参考工程使用 1000ms */
+#define SSD1315_I2C_TIMEOUT_MS  1000
 
 /**
  * @brief SSD1315 设备句柄（含 1024 字节帧缓冲区）

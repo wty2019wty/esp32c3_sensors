@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -22,6 +23,7 @@
 #include "freertos/task.h"
 
 #include "bmp280.h"
+#include "i2c_config.h"
 #include "mahony.h"
 #include "mpu9250.h"
 #include "sht40.h"
@@ -30,9 +32,7 @@
 static const char *TAG = "main";
 
 /* ---------------- 硬件与任务配置 ---------------- */
-#define I2C_SDA_GPIO            GPIO_NUM_8      /* I2C 数据线 */
-#define I2C_SCL_GPIO            GPIO_NUM_9      /* I2C 时钟线 */
-#define I2C_CLOCK_HZ            400000          /* 400kHz */
+/* I2C 引脚与速率见 i2c_config.h */
 #define I2C_TIMEOUT_MS          100             /* 所有 I2C 操作超时 */
 #define I2C_GLITCH_IGNORE_CNT   7               /* 典型滤波值 */
 
@@ -53,6 +53,10 @@ static const char *TAG = "main";
 
 #define DISPLAY_COLS            21
 #define DISPLAY_ROWS            8
+
+/* 设为 1 时只初始化 OLED 并显示测试图案，不初始化任何传感器，
+ * 用于单独排查 OLED 点亮问题（排除其它模块对总线的干扰）。 */
+#define OLED_SELF_TEST          1
 
 /* ---------------- 全局传感器数据结构 ---------------- */
 typedef struct {
@@ -97,6 +101,38 @@ static const uint8_t s_scan_addrs[I2C_DEV_COUNT] = {
 };
 
 /* ---------------- I2C 总线 ---------------- */
+
+/**
+ * @brief I2C 线电平自检：开内部上拉后读取 SDA/SCL 是否能为高
+ *
+ * 用于判断 GPIO8 板载 LED、短路或无上拉导致的 SDA 被拉低问题。
+ * 必须在 i2c_new_master_bus() 之前调用。
+ */
+static void i2c_lines_selftest(void)
+{
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << I2C_SDA_GPIO) | (1ULL << I2C_SCL_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t err = gpio_config(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "I2C 线自检配置失败: %s", esp_err_to_name(err));
+        return;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+    int sda = gpio_get_level(I2C_SDA_GPIO);
+    int scl = gpio_get_level(I2C_SCL_GPIO);
+    ESP_LOGI(TAG, "I2C 线自检：SDA=%d SCL=%d (1=可拉高, 0=被强下拉/短路)", sda, scl);
+
+    if (sda == 0 || scl == 0) {
+        ESP_LOGW(TAG, "检测到 I2C 线无法拉高：检查板载 LED(GPIO8)/短路/上拉电阻");
+    }
+}
+
 static esp_err_t i2c_bus_init(void)
 {
     i2c_master_bus_config_t bus_cfg = {
@@ -110,16 +146,48 @@ static esp_err_t i2c_bus_init(void)
     return i2c_new_master_bus(&bus_cfg, &s_bus);
 }
 
+/**
+ * @brief 探测一个 I2C 地址，失败时复位总线并重试一次
+ *
+ * @param[in] addr 7 位地址
+ * @return true 在线；false 未应答
+ */
+static bool i2c_probe_retry(uint8_t addr)
+{
+    if (i2c_master_probe(s_bus, addr, I2C_TIMEOUT_MS) == ESP_OK) {
+        return true;
+    }
+    /* 失败时复位总线（发送时钟脉冲释放被拉低的 SDA）后重试 */
+    (void)i2c_master_bus_reset(s_bus);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    return (i2c_master_probe(s_bus, addr, I2C_TIMEOUT_MS) == ESP_OK);
+}
+
 static void i2c_scan(void)
 {
-    ESP_LOGI(TAG, "开始扫描 I2C 总线 ...");
+    /* 先复位一次总线，清理可能残留的忙状态 */
+    (void)i2c_master_bus_reset(s_bus);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    /* 全地址扫描，便于排查模块真实地址/接线问题 */
+    ESP_LOGI(TAG, "全总线扫描 (0x08~0x77) ...");
+    int found = 0;
+    for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+        if (i2c_probe_retry(addr)) {
+            ESP_LOGI(TAG, "  发现 I2C 设备: 0x%02X", addr);
+            found++;
+        }
+    }
+    ESP_LOGI(TAG, "扫描完成，共发现 %d 个设备", found);
+
+    /* 逐一检查期望的四个地址 */
     for (int i = 0; i < I2C_DEV_COUNT; i++) {
-        bool online = (i2c_master_probe(s_bus, s_scan_addrs[i], I2C_TIMEOUT_MS) == ESP_OK);
+        bool online = i2c_probe_retry(s_scan_addrs[i]);
         s_data.i2c_devices[i] = online;
         if (online) {
-            ESP_LOGI(TAG, "  [OK ] 0x%02X 在线", s_scan_addrs[i]);
+            ESP_LOGI(TAG, "  期望设备 0x%02X: 在线", s_scan_addrs[i]);
         } else {
-            ESP_LOGE(TAG, "  [ERR] 0x%02X 未找到（请检查接线/供电/上拉）", s_scan_addrs[i]);
+            ESP_LOGE(TAG, "  期望设备 0x%02X: 未找到（检查接线/供电/上拉/地址跳线）", s_scan_addrs[i]);
         }
     }
 }
@@ -196,8 +264,8 @@ static void display_render(const sensor_data_t *d)
     }
     ssd1315_draw_string(&s_oled, 3, 0, line);
 
-    /* Line 4: 磁力计（μT） */
-    if (d->mpu9250_valid) {
+    /* Line 4: 磁力计（μT）；无磁力计时三轴全 0，显示 --- */
+    if (d->mpu9250_valid && !(d->mag_x == 0.0f && d->mag_y == 0.0f && d->mag_z == 0.0f)) {
         snprintf(line, sizeof(line), "MAG %4.0f %4.0f %4.0f uT",
                  (double)d->mag_x, (double)d->mag_y, (double)d->mag_z);
     } else {
@@ -222,9 +290,10 @@ static void display_render(const sensor_data_t *d)
         }
     }
     if (online == I2C_DEV_COUNT) {
-        snprintf(line, sizeof(line), "I2C:OK 400kHz");
+        snprintf(line, sizeof(line), "I2C:OK %dkHz", (int)(I2C_SCL_SPEED_HZ / 1000));
     } else {
-        snprintf(line, sizeof(line), "I2C:%d/%d 400kHz", online, I2C_DEV_COUNT);
+        snprintf(line, sizeof(line), "I2C:%d/%d %dkHz", online, I2C_DEV_COUNT,
+                 (int)(I2C_SCL_SPEED_HZ / 1000));
     }
     ssd1315_draw_string(&s_oled, 6, 0, line);
 
@@ -238,6 +307,7 @@ static void display_render(const sensor_data_t *d)
     esp_err_t err = ssd1315_flush(&s_oled);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OLED 刷新失败: %s", esp_err_to_name(err));
+        (void)i2c_master_bus_reset(s_bus);
     }
 }
 
@@ -269,6 +339,11 @@ static void sensor_task(void *arg)
         mpu9250_sample_t sample;
         memset(&sample, 0, sizeof(sample));
         bool mpu_ok = (mpu9250_read(&s_mpu, &sample) == ESP_OK);
+
+        /* 任一读取失败时复位总线，释放可能被拉低的 SDA */
+        if (!sht_ok || !bmp_ok || !mpu_ok) {
+            (void)i2c_master_bus_reset(s_bus);
+        }
 
         /* 计算采样间隔 */
         int64_t now_us = esp_timer_get_time();
@@ -350,10 +425,41 @@ static void display_task(void *arg)
     }
 }
 
+/* ---------------- OLED 单独自检 ---------------- */
+#if OLED_SELF_TEST
+/**
+ * @brief 仅测试 OLED：画棋盘格 + 文字，不初始化任何传感器
+ */
+static void oled_self_test(void)
+{
+    if (ssd1315_init(&s_oled, s_bus) != ESP_OK) {
+        ESP_LOGE(TAG, "OLED 自检初始化失败");
+        return;
+    }
+
+    ssd1315_clear(&s_oled);
+    for (uint8_t p = 0; p < SSD1315_PAGES; p++) {
+        for (uint8_t c = 0; c < SSD1315_WIDTH; c++) {
+            if (((p + c) & 1u) != 0u) {
+                s_oled.buf[(size_t)p * SSD1315_WIDTH + c] = 0xFF;
+            }
+        }
+    }
+    ssd1315_draw_string(&s_oled, 0, 0, "OLED TEST OK");
+    if (ssd1315_flush(&s_oled) == ESP_OK) {
+        ESP_LOGI(TAG, "OLED 自检成功");
+    } else {
+        ESP_LOGE(TAG, "OLED 自检刷新失败");
+    }
+}
+#endif
+
 /* ---------------- 入口 ---------------- */
 void app_main(void)
 {
     ESP_LOGI(TAG, "ESP32-C3 多传感器系统启动");
+
+    i2c_lines_selftest();
 
     esp_err_t err = i2c_bus_init();
     if (err != ESP_OK) {
@@ -361,7 +467,7 @@ void app_main(void)
         return;
     }
     ESP_LOGI(TAG, "I2C 总线初始化完成 (SDA=GPIO%d, SCL=GPIO%d, %dHz)",
-             I2C_SDA_GPIO, I2C_SCL_GPIO, I2C_CLOCK_HZ);
+             I2C_SDA_GPIO, I2C_SCL_GPIO, I2C_SCL_SPEED_HZ);
 
     s_data_mutex = xSemaphoreCreateMutex();
     if (s_data_mutex == NULL) {
@@ -369,6 +475,16 @@ void app_main(void)
         return;
     }
     memset(&s_data, 0, sizeof(s_data));
+
+#if OLED_SELF_TEST
+    oled_self_test();
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+#endif
+
+    /* 等待各模块上电稳定后再扫描 */
+    vTaskDelay(pdMS_TO_TICKS(200));
 
     /* 1. 扫描总线，记录设备在线状态 */
     i2c_scan();

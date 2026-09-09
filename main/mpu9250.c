@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "i2c_config.h"
 
 static const char *TAG = "mpu9250";
 
@@ -56,7 +57,7 @@ static esp_err_t mpu9250_init_mag(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = AK8963_I2C_ADDR,
-        .scl_speed_hz = 400000,
+        .scl_speed_hz = I2C_SCL_SPEED_HZ,
     };
     err = i2c_master_bus_add_device(bus, &dev_cfg, &mpu->mag_dev);
     if (err != ESP_OK) {
@@ -100,21 +101,28 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
     mpu->present = false;
     mpu->mag_present = false;
 
-    esp_err_t err = i2c_master_probe(bus, MPU9250_I2C_ADDR, MPU9250_I2C_TIMEOUT_MS);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "MPU9250 (0x%02X) 探测失败: %s", MPU9250_I2C_ADDR, esp_err_to_name(err));
-        return err;
+    /* 依次尝试主地址与备用地址 */
+    static const uint8_t addrs[] = { MPU9250_I2C_ADDR, MPU9250_I2C_ADDR_ALT };
+    uint8_t used_addr = 0;
+    esp_err_t err = ESP_ERR_NOT_FOUND;
+    for (size_t i = 0; i < sizeof(addrs) / sizeof(addrs[0]); i++) {
+        if (i2c_master_probe(bus, addrs[i], MPU9250_I2C_TIMEOUT_MS) != ESP_OK) {
+            continue;
+        }
+        i2c_device_config_t dev_cfg = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = addrs[i],
+            .scl_speed_hz = I2C_SCL_SPEED_HZ,
+        };
+        err = i2c_master_bus_add_device(bus, &dev_cfg, &mpu->dev);
+        if (err == ESP_OK) {
+            used_addr = addrs[i];
+            break;
+        }
     }
-
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = MPU9250_I2C_ADDR,
-        .scl_speed_hz = 400000,
-    };
-    err = i2c_master_bus_add_device(bus, &dev_cfg, &mpu->dev);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "MPU9250 添加设备失败: %s", esp_err_to_name(err));
-        return err;
+    if (used_addr == 0) {
+        ESP_LOGE(TAG, "MPU9250 未找到 (尝试 0x%02X/0x%02X)", MPU9250_I2C_ADDR, MPU9250_I2C_ADDR_ALT);
+        return ESP_ERR_NOT_FOUND;
     }
 
     /* 校验 WHOAMI */
@@ -124,8 +132,9 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
         ESP_LOGE(TAG, "读取 WHOAMI 失败: %s", esp_err_to_name(err));
         return err;
     }
-    if (who != MPU9250_WHOAMI_MPU9250 && who != MPU9250_WHOAMI_MPU9255) {
-        ESP_LOGE(TAG, "WHOAMI 不匹配: 0x%02X (期望 0x71/0x73)", who);
+    if (who != MPU9250_WHOAMI_MPU9250 && who != MPU9250_WHOAMI_MPU9255 &&
+        who != MPU9250_WHOAMI_MPU6500) {
+        ESP_LOGE(TAG, "WHOAMI 不匹配: 0x%02X (期望 0x70/0x71/0x73)", who);
         return ESP_ERR_INVALID_RESPONSE;
     }
 
@@ -163,7 +172,7 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
     vTaskDelay(pdMS_TO_TICKS(10));
 
     mpu->present = true;
-    ESP_LOGI(TAG, "MPU9250 初始化成功 (0x%02X), WHOAMI=0x%02X", MPU9250_I2C_ADDR, who);
+    ESP_LOGI(TAG, "MPU9250 初始化成功 (0x%02X), WHOAMI=0x%02X", used_addr, who);
 
     /* 磁力计为可选，失败不影响 IMU 主体 */
     (void)mpu9250_init_mag(mpu, bus);

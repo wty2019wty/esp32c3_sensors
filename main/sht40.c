@@ -4,6 +4,7 @@
 #include "sht40.h"
 
 #include "esp_log.h"
+#include "i2c_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -34,27 +35,31 @@ esp_err_t sht40_init(sht40_t *sht, i2c_master_bus_handle_t bus)
     sht->dev = NULL;
     sht->present = false;
 
-    /* 先探测设备是否存在 */
-    esp_err_t err = i2c_master_probe(bus, SHT40_I2C_ADDR, SHT40_I2C_TIMEOUT_MS);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SHT40 (0x%02X) 探测失败: %s", SHT40_I2C_ADDR, esp_err_to_name(err));
-        return err;
+    /* 依次尝试主地址与备用地址 */
+    static const uint8_t addrs[] = { SHT40_I2C_ADDR, SHT40_I2C_ADDR_ALT };
+    for (size_t i = 0; i < sizeof(addrs) / sizeof(addrs[0]); i++) {
+        if (i2c_master_probe(bus, addrs[i], SHT40_I2C_TIMEOUT_MS) != ESP_OK) {
+            continue;
+        }
+
+        i2c_device_config_t dev_cfg = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = addrs[i],
+            .scl_speed_hz = I2C_SCL_SPEED_HZ,
+        };
+        esp_err_t err = i2c_master_bus_add_device(bus, &dev_cfg, &sht->dev);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "SHT40 添加设备失败: %s", esp_err_to_name(err));
+            return err;
+        }
+
+        sht->present = true;
+        ESP_LOGI(TAG, "SHT40 初始化成功 (0x%02X)", addrs[i]);
+        return ESP_OK;
     }
 
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = SHT40_I2C_ADDR,
-        .scl_speed_hz = 400000,
-    };
-    err = i2c_master_bus_add_device(bus, &dev_cfg, &sht->dev);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SHT40 添加设备失败: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    sht->present = true;
-    ESP_LOGI(TAG, "SHT40 初始化成功 (0x%02X)", SHT40_I2C_ADDR);
-    return ESP_OK;
+    ESP_LOGE(TAG, "SHT40 未找到 (尝试 0x%02X/0x%02X)", SHT40_I2C_ADDR, SHT40_I2C_ADDR_ALT);
+    return ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t sht40_read(sht40_t *sht, float *temp_c, float *humi_rh)

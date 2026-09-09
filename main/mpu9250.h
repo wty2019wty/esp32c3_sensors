@@ -12,6 +12,7 @@
 
 /* I2C 从机地址 */
 #define MPU9250_I2C_ADDR                0x68    /* AD0 接地 */
+#define MPU9250_I2C_ADDR_ALT            0x69    /* AD0 接高 */
 #define AK8963_I2C_ADDR                 0x0C    /* MPU9250 内置磁力计 */
 
 /* MPU9250 寄存器（Register Map） */
@@ -37,6 +38,7 @@
 /* WHOAMI 期望值 */
 #define MPU9250_WHOAMI_MPU9250          0x71
 #define MPU9250_WHOAMI_MPU9255          0x73
+#define MPU9250_WHOAMI_MPU6500          0x70    /* GY-91 常见实际芯片 */
 #define AK8963_WIA_ID                   0x48
 
 /* 寄存器写入值 */

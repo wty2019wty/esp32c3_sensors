@@ -1,17 +1,23 @@
 /*
  * SSD1315 OLED 驱动实现（ESP-IDF v6.1 新版 I2C master API）
+ *
+ * 点亮方式参考已验证工程 G:\esp32s3\ssd1315oled：
+ *   - 初始化命令逐条发送（每条控制字节 0x00）
+ *   - 刷新时使用水平寻址（0x21 列范围 / 0x22 页范围）
+ *   - 一次性发送整帧 1024 字节数据
  */
 #include "ssd1315.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
 #include "font_6x8.h"
+#include "i2c_config.h"
 
 static const char *TAG = "ssd1315";
 
-/* 初始化命令序列（任务书给定，SSD1315 兼容 SSD1306 指令集）。
- * 单条控制字节 0x00 后跟的全部字节均作为命令处理。 */
+/* 初始化命令序列（任务书给定，SSD1315 兼容 SSD1306 指令集） */
 static const uint8_t s_init_cmds[] = {
     0xAE,           /* 关闭显示 */
     0x20, 0x00,     /* 水平寻址模式 */
@@ -34,23 +40,26 @@ static const uint8_t s_init_cmds[] = {
     0xAF,           /* 开启显示 */
 };
 
-/* 发送一批命令（首字节为控制字节 0x00） */
-static esp_err_t ssd1315_send_cmds(ssd1315_t *oled, const uint8_t *cmds, size_t len)
-{
-    uint8_t tmp[1 + sizeof(s_init_cmds)];
-    if (len + 1 > sizeof(tmp)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    tmp[0] = SSD1315_CTRL_CMD;
-    memcpy(&tmp[1], cmds, len);
-    return i2c_master_transmit(oled->dev, tmp, len + 1, SSD1315_I2C_TIMEOUT_MS);
-}
-
-/* 发送单条命令 */
+/* 发送单条命令：[0x00, cmd] */
 static esp_err_t ssd1315_send_cmd(ssd1315_t *oled, uint8_t cmd)
 {
-    uint8_t tmp[2] = {SSD1315_CTRL_CMD, cmd};
-    return i2c_master_transmit(oled->dev, tmp, sizeof(tmp), SSD1315_I2C_TIMEOUT_MS);
+    uint8_t buf[2] = {SSD1315_CTRL_CMD, cmd};
+    return i2c_master_transmit(oled->dev, buf, sizeof(buf), SSD1315_I2C_TIMEOUT_MS);
+}
+
+/* 发送一段数据：[0x40, data...] */
+static esp_err_t ssd1315_send_data(ssd1315_t *oled, const uint8_t *data, size_t len)
+{
+    uint8_t *buf = malloc(len + 1);
+    if (buf == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    buf[0] = SSD1315_CTRL_DATA;
+    memcpy(buf + 1, data, len);
+
+    esp_err_t ret = i2c_master_transmit(oled->dev, buf, len + 1, SSD1315_I2C_TIMEOUT_MS);
+    free(buf);
+    return ret;
 }
 
 esp_err_t ssd1315_init(ssd1315_t *oled, i2c_master_bus_handle_t bus)
@@ -62,27 +71,40 @@ esp_err_t ssd1315_init(ssd1315_t *oled, i2c_master_bus_handle_t bus)
     memset(oled, 0, sizeof(*oled));
     oled->present = false;
 
-    esp_err_t err = i2c_master_probe(bus, SSD1315_I2C_ADDR, SSD1315_I2C_TIMEOUT_MS);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SSD1315 (0x%02X) 探测失败: %s", SSD1315_I2C_ADDR, esp_err_to_name(err));
-        return err;
+    /* 初始化前复位总线，清理可能残留的忙状态 */
+    (void)i2c_master_bus_reset(bus);
+
+    /* 依次尝试主地址与备用地址 */
+    static const uint8_t addrs[] = { SSD1315_I2C_ADDR, SSD1315_I2C_ADDR_ALT };
+    uint8_t used_addr = 0;
+    esp_err_t err = ESP_ERR_NOT_FOUND;
+    for (size_t i = 0; i < sizeof(addrs) / sizeof(addrs[0]); i++) {
+        if (i2c_master_probe(bus, addrs[i], SSD1315_I2C_TIMEOUT_MS) != ESP_OK) {
+            continue;
+        }
+        i2c_device_config_t dev_cfg = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = addrs[i],
+            .scl_speed_hz = I2C_SCL_SPEED_HZ,
+        };
+        err = i2c_master_bus_add_device(bus, &dev_cfg, &oled->dev);
+        if (err == ESP_OK) {
+            used_addr = addrs[i];
+            break;
+        }
+    }
+    if (used_addr == 0) {
+        ESP_LOGE(TAG, "SSD1315 未找到 (尝试 0x%02X/0x%02X)", SSD1315_I2C_ADDR, SSD1315_I2C_ADDR_ALT);
+        return ESP_ERR_NOT_FOUND;
     }
 
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = SSD1315_I2C_ADDR,
-        .scl_speed_hz = 400000,
-    };
-    err = i2c_master_bus_add_device(bus, &dev_cfg, &oled->dev);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SSD1315 添加设备失败: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    err = ssd1315_send_cmds(oled, s_init_cmds, sizeof(s_init_cmds));
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SSD1315 初始化命令失败: %s", esp_err_to_name(err));
-        return err;
+    /* 逐条发送初始化命令 */
+    for (size_t i = 0; i < sizeof(s_init_cmds); i++) {
+        err = ssd1315_send_cmd(oled, s_init_cmds[i]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "SSD1315 初始化命令 0x%02X 失败: %s", s_init_cmds[i], esp_err_to_name(err));
+            return err;
+        }
     }
 
     oled->present = true;
@@ -93,7 +115,7 @@ esp_err_t ssd1315_init(ssd1315_t *oled, i2c_master_bus_handle_t bus)
         return err;
     }
 
-    ESP_LOGI(TAG, "SSD1315 初始化成功 (0x%02X, %dx%d)", SSD1315_I2C_ADDR, SSD1315_WIDTH, SSD1315_HEIGHT);
+    ESP_LOGI(TAG, "SSD1315 初始化成功 (0x%02X, %dx%d)", used_addr, SSD1315_WIDTH, SSD1315_HEIGHT);
     return ESP_OK;
 }
 
@@ -143,30 +165,20 @@ esp_err_t ssd1315_flush(ssd1315_t *oled)
         return ESP_ERR_INVALID_STATE;
     }
 
-    for (uint8_t page = 0; page < SSD1315_PAGES; page++) {
-        /* 设置页地址与列地址（低 4 位 + 高 4 位） */
-        esp_err_t err = ssd1315_send_cmd(oled, (uint8_t)(0xB0u | page));
-        if (err != ESP_OK) {
-            return err;
-        }
-        err = ssd1315_send_cmd(oled, 0x00);     /* 低列地址 = 0 */
-        if (err != ESP_OK) {
-            return err;
-        }
-        err = ssd1315_send_cmd(oled, 0x10);     /* 高列地址 = 0 */
-        if (err != ESP_OK) {
-            return err;
-        }
+    esp_err_t err;
 
-        /* 发送 128 字节数据（首字节为数据控制字节 0x40） */
-        uint8_t data[1 + SSD1315_WIDTH];
-        data[0] = SSD1315_CTRL_DATA;
-        memcpy(&data[1], &oled->buf[(size_t)page * SSD1315_WIDTH], SSD1315_WIDTH);
-        err = i2c_master_transmit(oled->dev, data, sizeof(data), SSD1315_I2C_TIMEOUT_MS);
-        if (err != ESP_OK) {
-            return err;
-        }
+    /* 水平寻址：列 0~127 */
+    err = ssd1315_send_cmd(oled, 0x21);
+    if (err == ESP_OK) err = ssd1315_send_cmd(oled, 0x00);
+    if (err == ESP_OK) err = ssd1315_send_cmd(oled, 0x7F);
+    /* 页 0~7 */
+    if (err == ESP_OK) err = ssd1315_send_cmd(oled, 0x22);
+    if (err == ESP_OK) err = ssd1315_send_cmd(oled, 0x00);
+    if (err == ESP_OK) err = ssd1315_send_cmd(oled, 0x07);
+    if (err != ESP_OK) {
+        return err;
     }
 
-    return ESP_OK;
+    /* 一次性发送整帧 1024 字节 */
+    return ssd1315_send_data(oled, oled->buf, SSD1315_BUF_SIZE);
 }
