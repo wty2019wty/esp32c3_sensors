@@ -40,7 +40,8 @@
 typedef struct {
     i2c_master_dev_handle_t dev;
     bool present;
-    uint8_t buf[SSD1315_BUF_SIZE];
+    uint8_t buf[SSD1315_BUF_SIZE];      /* 当前帧缓冲 */
+    uint8_t shadow[SSD1315_BUF_SIZE];   /* 上次已写入屏幕的内容（用于脏页判断） */
 } ssd1315_t;
 
 /**
