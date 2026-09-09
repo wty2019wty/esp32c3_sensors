@@ -56,7 +56,7 @@ static const char *TAG = "main";
 
 /* 设为 1 时只初始化 OLED 并显示测试图案，不初始化任何传感器，
  * 用于单独排查 OLED 点亮问题（排除其它模块对总线的干扰）。 */
-#define OLED_SELF_TEST          1
+#define OLED_SELF_TEST          0
 
 /* ---------------- 全局传感器数据结构 ---------------- */
 typedef struct {
