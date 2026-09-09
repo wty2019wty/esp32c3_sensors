@@ -117,3 +117,23 @@ Up:00:05:23 Heap:123K
 10. **共享数据结构**
     - `sensor_task` 与 `display_task` 通过 `SemaphoreHandle_t` 互斥锁保护
       `sensor_data_t`；I2C 总线访问由 ESP-IDF 新版 I2C master 驱动内部串行化。
+
+## 6. 实测结论（ESP32-C3 Super Mini + GY-91 + SHT40 + SSD1315）
+
+本工程在实机上调试得到以下结论，供接线参考：
+
+1. **OLED 供电务必确认**
+   - 单独测试时曾因忘记给 OLED 接 VCC 导致 0x3C 扫不到；务必确认 OLED 的 VCC 接 3.3V。
+   - 若高码率（400kHz）下出现长数据写入超时，再优先检查上拉电阻与线材长度。
+   - 降速（`I2C_SCL_SPEED_HZ` 改 100000/10000）可作为快速排查手段。
+
+2. **GY-91 实际为 MPU6500 + BMP280**
+   - 读取 WHOAMI 返回 **0x70（MPU6500）**，而非 0x71（MPU9250），且 0x0C 无 AK8963。
+   - 这是 GY-91 常见的“标 MPU9250 实为 MPU6500”版本；加速度/陀螺仪/姿态可用，
+     **无磁力计**，磁力计行显示 `MAG --- --- --- uT`。
+   - 驱动已兼容 0x70/0x71/0x73 三种 WHOAMI。
+
+3. **I2C 时钟是“按设备”设置的**
+   - ESP-IDF v6.1 新版驱动的时钟在 `i2c_device_config_t.scl_speed_hz`，总线配置结构体
+     没有时钟字段；因此统一改速必须改 `main/i2c_config.h` 的 `I2C_SCL_SPEED_HZ`。
+
