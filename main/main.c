@@ -26,7 +26,7 @@
 #include "i2c_config.h"
 #include "imu_bias_calib.h"
 #include "imu_filter.h"
-#include "mahony.h"
+#include "ekf_ahrs.h"
 #include "mpu9250.h"
 #include "sht40.h"
 #include "ssd1315.h"
@@ -52,8 +52,10 @@ static const char *TAG = "main";
 #define I2C_ADDR_MPU9250        0x68
 #define I2C_ADDR_BMP280         0x76
 
-#define MAHONY_KP               1.0f
-#define MAHONY_KI               0.0005f
+/* EKF 姿态估计噪声参数 */
+#define EKF_Q_GYRO              0.005f          /* 陀螺仪过程噪声（rad/s）^2，越小越信任陀螺仪 */
+#define EKF_R_ACCEL             0.3f            /* 加速度计观测噪声，越小越信任加速度计（抖动大→调大） */
+#define EKF_R_MAG               0.5f            /* 磁力计观测噪声（0 = 不使用磁力计修正 yaw） */
 
 /* IMU 前端滤波与零偏校准（移植自 stm32f103 提高陀螺仪精度的方案） */
 #define IMU_SAMPLE_HZ           (1000.0f / IMU_PERIOD_MS)  /* 100Hz */
@@ -325,19 +327,19 @@ static void display_render(const sensor_data_t *d)
 /* ---------------- 任务 ---------------- */
 
 /**
- * @brief IMU 任务：100Hz 读取 MPU9250，经 二阶低通滤波 -> 零偏校准/跟踪 -> Mahony 融合
+ * @brief IMU 任务：100Hz 读取 MPU9250，经 二阶低通滤波 -> 零偏校准/跟踪 -> EKF 姿态融合
  *
  * 该流水线移植自 stm32f103 工程提高陀螺仪精度的方案：
  *   1) imu_filter        抑制高频噪声，稳定陀螺积分；
  *   2) imu_bias_calib    上电静止校准 + 运行期静止零偏跟踪，消除陀螺漂移；
- *   3) mahony_update     四元数姿态融合，输出 Roll/Pitch/Yaw。
+ *   3) ekf_ahrs_update   四元数 EKF 姿态融合，输出 Roll/Pitch/Yaw。
  */
 static void imu_task(void *arg)
 {
     (void)arg;
 
-    mahony_t ahrs;
-    mahony_init(&ahrs, MAHONY_KP, MAHONY_KI);
+    ekf_ahrs_t ahrs;
+    ekf_ahrs_init(&ahrs, EKF_Q_GYRO, EKF_R_ACCEL, EKF_R_MAG);
 
     imu_filter_t filter;
     imu_filter_init(&filter, IMU_SAMPLE_HZ,
@@ -373,15 +375,15 @@ static void imu_task(void *arg)
         if (mpu_ok) {
             imu_filter_process(&raw, &filtered, &filter);
             imu_bias_calib_update(&calib, &filtered, &fused_in);
-            mahony_update(&ahrs,
-                          fused_in.gyro_x, fused_in.gyro_y, fused_in.gyro_z,
-                          fused_in.acc_x, fused_in.acc_y, fused_in.acc_z,
-                          fused_in.mag_x, fused_in.mag_y, fused_in.mag_z,
-                          dt);
+            ekf_ahrs_update(&ahrs,
+                            fused_in.gyro_x, fused_in.gyro_y, fused_in.gyro_z,
+                            fused_in.acc_x, fused_in.acc_y, fused_in.acc_z,
+                            fused_in.mag_x, fused_in.mag_y, fused_in.mag_z,
+                            dt);
         }
 
         float roll = 0.0f, pitch = 0.0f, yaw = 0.0f;
-        mahony_get_euler(&ahrs, &roll, &pitch, &yaw);
+        ekf_ahrs_get_euler(&ahrs, &roll, &pitch, &yaw);
 
         xSemaphoreTake(s_data_mutex, portMAX_DELAY);
         if (mpu_ok) {
