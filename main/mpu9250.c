@@ -162,14 +162,28 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
     }
 
     /* 关闭内部 I2C 主机并打开 Bypass，使 AK8963 直接挂在总线上 */
-    (void)mpu_write_reg(mpu, MPU9250_REG_USER_CTRL, MPU9250_USER_CTRL_I2C_MST_OFF);
+    err = mpu_write_reg(mpu, MPU9250_REG_USER_CTRL, MPU9250_USER_CTRL_I2C_MST_OFF);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "关闭 I2C Master 失败: %s", esp_err_to_name(err));
+        return err;
+    }
     vTaskDelay(pdMS_TO_TICKS(10));
+    
     err = mpu_write_reg(mpu, MPU9250_REG_INT_PIN_CFG, MPU9250_INT_PIN_CFG_BYPASS);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "配置 I2C Bypass 失败: %s", esp_err_to_name(err));
         return err;
     }
     vTaskDelay(pdMS_TO_TICKS(100));  /* 旁路模式稳定 + AK8963 上电时间 */
+    
+    /* 调试：读回寄存器验证写入 */
+    uint8_t user_ctrl = 0, int_pin_cfg = 0;
+    (void)mpu_read_regs(mpu, MPU9250_REG_USER_CTRL, &user_ctrl, 1);
+    (void)mpu_read_regs(mpu, MPU9250_REG_INT_PIN_CFG, &int_pin_cfg, 1);
+    ESP_LOGI(TAG, "寄存器验证: USER_CTRL=0x%02X, INT_PIN_CFG=0x%02X", user_ctrl, int_pin_cfg);
+    if ((int_pin_cfg & 0x02) == 0) {
+        ESP_LOGW(TAG, "警告: BYPASS_EN 位未设置成功!");
+    }
 
     mpu->present = true;
     ESP_LOGI(TAG, "MPU9250 初始化成功 (0x%02X), WHOAMI=0x%02X", used_addr, who);
