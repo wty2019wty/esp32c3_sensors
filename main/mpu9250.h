@@ -35,10 +35,10 @@
 #define AK8963_REG_CNTL1                0x0A    /* 工作模式 */
 #define AK8963_REG_ASAX                 0x10    /* 灵敏度调整起始 */
 
-/* WHOAMI 期望值 */
-#define MPU9250_WHOAMI_MPU9250          0x71
+/* WHOAMI 期望值（参考数据手册 PS-MPU-9250A-01 Rev1.1） */
+#define MPU9250_WHOAMI_MPU9250          0x70    /* MPU-9250 实际 ID */
 #define MPU9250_WHOAMI_MPU9255          0x73
-#define MPU9250_WHOAMI_MPU6500          0x70    /* GY-91 常见实际芯片 */
+#define MPU9250_WHOAMI_MPU6500          0x71    /* MPU-6500 实际 ID */
 #define AK8963_WIA_ID                   0x48
 
 /* 寄存器写入值 */

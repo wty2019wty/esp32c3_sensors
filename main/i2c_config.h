@@ -18,11 +18,10 @@
 #define I2C_SCL_GPIO            GPIO_NUM_9
 
 /* SCL 频率：
- *   800000  -> 当前目标（Fast-mode Plus，需强上拉 2.2kΩ + 短线）
- *   400000  -> 标准 Fast-mode
+ *   400000  -> MPU-9250 数据手册规定最高 400kHz (Fast-mode)
  *   100000  -> 排查用
  */
-#define I2C_SCL_SPEED_HZ        800000
+#define I2C_SCL_SPEED_HZ        400000
 
 /* 所有 I2C 操作统一超时（毫秒） */
 #define I2C_BUS_TIMEOUT_MS      100

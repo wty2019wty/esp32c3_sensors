@@ -132,21 +132,20 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
         ESP_LOGE(TAG, "读取 WHOAMI 失败: %s", esp_err_to_name(err));
         return err;
     }
-    if (who != MPU9250_WHOAMI_MPU9250 && who != MPU9250_WHOAMI_MPU9255 &&
-        who != MPU9250_WHOAMI_MPU6500) {
-        ESP_LOGE(TAG, "WHOAMI 不匹配: 0x%02X (期望 0x70/0x71/0x73)", who);
+    if (who != MPU9250_WHOAMI_MPU9250 && who != MPU9250_WHOAMI_MPU9255) {
+        ESP_LOGE(TAG, "WHOAMI 不匹配: 0x%02X (期望 0x70/0x73)", who);
         return ESP_ERR_INVALID_RESPONSE;
     }
 
     /* 软复位 -> 唤醒（PLL 陀螺 X 参考） */
     (void)mpu_write_reg(mpu, MPU9250_REG_PWR_MGMT_1, MPU9250_PWR_MGMT_1_RESET);
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(100));  /* 数据手册要求软复位后 ≥50ms */
     err = mpu_write_reg(mpu, MPU9250_REG_PWR_MGMT_1, MPU9250_PWR_MGMT_1_WAKE_PLL);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "唤醒 MPU9250 失败: %s", esp_err_to_name(err));
         return err;
     }
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(50));  /* 唤醒后稳定时间 */
 
     /* 采样率与量程配置 */
     (void)mpu_write_reg(mpu, MPU9250_REG_SMPLRT_DIV, MPU9250_SMPLRT_DIV_100HZ);
@@ -164,12 +163,13 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
 
     /* 关闭内部 I2C 主机并打开 Bypass，使 AK8963 直接挂在总线上 */
     (void)mpu_write_reg(mpu, MPU9250_REG_USER_CTRL, MPU9250_USER_CTRL_I2C_MST_OFF);
+    vTaskDelay(pdMS_TO_TICKS(10));
     err = mpu_write_reg(mpu, MPU9250_REG_INT_PIN_CFG, MPU9250_INT_PIN_CFG_BYPASS);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "配置 I2C Bypass 失败: %s", esp_err_to_name(err));
         return err;
     }
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(100));  /* 旁路模式稳定 + AK8963 上电时间 */
 
     mpu->present = true;
     ESP_LOGI(TAG, "MPU9250 初始化成功 (0x%02X), WHOAMI=0x%02X", used_addr, who);
