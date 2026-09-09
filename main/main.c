@@ -206,19 +206,23 @@ static void i2c_scan(void)
 /* ---------------- 数值格式化辅助 ---------------- */
 
 /**
- * @brief 将浮点数格式化为 2 位小数，并去掉整数部分的 0（如 0.12 -> .12）
+ * @brief 将浮点数格式化为固定宽度、右对齐、2 位小数的字段
  *
- * @param[out] out 输出缓冲区
- * @param[in]  n   缓冲区大小
- * @param[in]  v   输入值
+ * 宽度固定可保证小数点位置不随数值变化而左右跳动；
+ * 无效数据用 "---" 右对齐占位，同样保持位置稳定。
+ *
+ * @param[out] out   输出缓冲区
+ * @param[in]  n     缓冲区大小
+ * @param[in]  valid 数据是否有效
+ * @param[in]  v     输入值
+ * @param[in]  width 字段宽度（字符数）
  */
-static void fmt_fixed2(char *out, size_t n, float v)
+static void fmt_field(char *out, size_t n, bool valid, float v, int width)
 {
-    snprintf(out, n, "%.2f", (double)v);
-    if (out[0] == '0' && out[1] == '.') {
-        memmove(out, out + 1, strlen(out));
-    } else if (out[0] == '-' && out[1] == '0' && out[2] == '.') {
-        memmove(out + 1, out + 2, strlen(out + 2) + 1);
+    if (valid) {
+        snprintf(out, n, "%*.*f", width, 2, (double)v);
+    } else {
+        snprintf(out, n, "%*s", width, "---");
     }
 }
 
@@ -237,77 +241,70 @@ static void display_render(const sensor_data_t *d)
     /* 刷新时先清缓冲区，避免残影 */
     ssd1315_clear(&s_oled);
 
-    /* Line 0: SHT40 温湿度 */
-    if (d->sht40_valid) {
-        snprintf(line, sizeof(line), "SHT:%.1fC %.1f%%",
-                 (double)d->sht40_temp, (double)d->sht40_humi);
-    } else {
-        snprintf(line, sizeof(line), "SHT:---  ---");
-    }
-    ssd1315_draw_string(&s_oled, 0, 0, line);
-
-    /* Line 1: BMP280 温度/气压/海拔 */
-    if (d->bmp280_valid) {
-        snprintf(line, sizeof(line), "BMP:%.1fC %.0fhPa %.0fm",
-                 (double)d->bmp280_temp, (double)d->bmp280_press, (double)d->bmp280_alt);
-    } else {
-        snprintf(line, sizeof(line), "BMP:---  ----- -----");
-    }
-    ssd1315_draw_string(&s_oled, 1, 0, line);
-
-    /* Line 2: 加速度计（g） */
-    if (d->mpu9250_valid) {
-        fmt_fixed2(a, sizeof(a), d->acc_x);
-        fmt_fixed2(b, sizeof(b), d->acc_y);
-        fmt_fixed2(c, sizeof(c), d->acc_z);
-        snprintf(line, sizeof(line), "ACC %s %s %s g", a, b, c);
-    } else {
-        snprintf(line, sizeof(line), "ACC --- --- --- g");
-    }
-    ssd1315_draw_string(&s_oled, 2, 0, line);
-
-    /* Line 3: 陀螺仪（°/s） */
-    if (d->mpu9250_valid) {
-        snprintf(line, sizeof(line), "GYR %4.0f %4.0f %4.0f d/s",
-                 (double)d->gyro_x, (double)d->gyro_y, (double)d->gyro_z);
-    } else {
-        snprintf(line, sizeof(line), "GYR --- --- --- d/s");
-    }
-    ssd1315_draw_string(&s_oled, 3, 0, line);
-
-    /* Line 4: 磁力计（μT）；无磁力计时三轴全 0，显示 --- */
-    if (d->mpu9250_valid && !(d->mag_x == 0.0f && d->mag_y == 0.0f && d->mag_z == 0.0f)) {
-        snprintf(line, sizeof(line), "MAG %4.0f %4.0f %4.0f uT",
-                 (double)d->mag_x, (double)d->mag_y, (double)d->mag_z);
-    } else {
-        snprintf(line, sizeof(line), "MAG --- --- --- uT");
-    }
-    ssd1315_draw_string(&s_oled, 4, 0, line);
-
-    /* Line 5: Mahony 姿态角（校准期间显示 CAL） */
-    if (d->mpu9250_valid && d->imu_calibrated) {
-        snprintf(line, sizeof(line), "R:%.1f P:%.1f Y:%.1f",
-                 (double)d->roll, (double)d->pitch, (double)d->yaw);
-    } else if (d->mpu9250_valid) {
-        snprintf(line, sizeof(line), "R:--- P:--- Y:--- CAL");
-    } else {
-        snprintf(line, sizeof(line), "R:--- P:--- Y:---");
-    }
-    ssd1315_draw_string(&s_oled, 5, 0, line);
-
-    /* Line 6: I2C 总线状态 */
+    /* I2C 在线设备数（Line 2 右侧复用） */
     int online = 0;
     for (int i = 0; i < I2C_DEV_COUNT; i++) {
         if (d->i2c_devices[i]) {
             online++;
         }
     }
+    char i2c[12];
     if (online == I2C_DEV_COUNT) {
-        snprintf(line, sizeof(line), "I2C:OK %dkHz", (int)(I2C_SCL_SPEED_HZ / 1000));
+        snprintf(i2c, sizeof(i2c), "OK");
     } else {
-        snprintf(line, sizeof(line), "I2C:%d/%d %dkHz", online, I2C_DEV_COUNT,
-                 (int)(I2C_SCL_SPEED_HZ / 1000));
+        snprintf(i2c, sizeof(i2c), "%d/%d", online, I2C_DEV_COUNT);
     }
+
+    /* Line 0: SHT40 温度/湿度（固定宽度，2 位小数） */
+    fmt_field(a, sizeof(a), d->sht40_valid, d->sht40_temp, 6);
+    fmt_field(b, sizeof(b), d->sht40_valid, d->sht40_humi, 6);
+    snprintf(line, sizeof(line), "SHT %sC %s%%", a, b);
+    ssd1315_draw_string(&s_oled, 0, 0, line);
+
+    /* Line 1: BMP280 温度/气压（固定宽度，2 位小数） */
+    fmt_field(a, sizeof(a), d->bmp280_valid, d->bmp280_temp, 6);
+    fmt_field(b, sizeof(b), d->bmp280_valid, d->bmp280_press, 7);
+    snprintf(line, sizeof(line), "BMP %s %shPa", a, b);
+    ssd1315_draw_string(&s_oled, 1, 0, line);
+
+    /* Line 2: BMP280 海拔 + I2C 状态（校准期间显示 CAL） */
+    fmt_field(a, sizeof(a), d->bmp280_valid, d->bmp280_alt, 7);
+    if (d->mpu9250_valid && !d->imu_calibrated) {
+        snprintf(line, sizeof(line), "ALT %sm CAL", a);
+    } else {
+        snprintf(line, sizeof(line), "ALT %sm I2C:%s", a, i2c);
+    }
+    ssd1315_draw_string(&s_oled, 2, 0, line);
+
+    /* Line 3: 加速度计（A，单位 g，固定宽度） */
+    fmt_field(a, sizeof(a), d->mpu9250_valid, d->acc_x, 6);
+    fmt_field(b, sizeof(b), d->mpu9250_valid, d->acc_y, 6);
+    fmt_field(c, sizeof(c), d->mpu9250_valid, d->acc_z, 6);
+    snprintf(line, sizeof(line), "A%s %s %s", a, b, c);
+    ssd1315_draw_string(&s_oled, 3, 0, line);
+
+    /* Line 4: 陀螺仪（G，单位 °/s，已零偏补偿，固定宽度） */
+    fmt_field(a, sizeof(a), d->mpu9250_valid, d->gyro_x, 6);
+    fmt_field(b, sizeof(b), d->mpu9250_valid, d->gyro_y, 6);
+    fmt_field(c, sizeof(c), d->mpu9250_valid, d->gyro_z, 6);
+    snprintf(line, sizeof(line), "G%s %s %s", a, b, c);
+    ssd1315_draw_string(&s_oled, 4, 0, line);
+
+    /* Line 5: 磁力计（M，单位 μT，固定宽度）；无磁力计时显示 --- */
+    bool mag_valid = d->mpu9250_valid &&
+                     !(d->mag_x == 0.0f && d->mag_y == 0.0f && d->mag_z == 0.0f);
+    fmt_field(a, sizeof(a), mag_valid, d->mag_x, 6);
+    fmt_field(b, sizeof(b), mag_valid, d->mag_y, 6);
+    fmt_field(c, sizeof(c), mag_valid, d->mag_z, 6);
+    snprintf(line, sizeof(line), "M%s %s %s", a, b, c);
+    ssd1315_draw_string(&s_oled, 5, 0, line);
+
+    /* Line 6: Mahony 姿态角（R/P/Y，单位 °，固定宽度） */
+    bool att_valid = d->mpu9250_valid && d->imu_calibrated;
+    fmt_field(a, sizeof(a), att_valid, d->roll, 6);
+    fmt_field(b, sizeof(b), att_valid, d->pitch, 6);
+    fmt_field(c, sizeof(c), att_valid, d->yaw, 6);
+    snprintf(line, sizeof(line), "R%sP%sY%s", a, b, c);
     ssd1315_draw_string(&s_oled, 6, 0, line);
 
     /* Line 7: 运行时间 + 空闲堆 */
