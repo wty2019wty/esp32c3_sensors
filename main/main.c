@@ -105,6 +105,7 @@ static ssd1315_t s_oled;
 
 static sensor_data_t s_data;
 static SemaphoreHandle_t s_data_mutex;
+static SemaphoreHandle_t s_i2c_mutex;       /* I2C 总线互斥锁，保护多任务并发访问 */
 
 /* 扫描的 I2C 地址顺序与 i2c_devices[] 下标一一对应 */
 static const uint8_t s_scan_addrs[I2C_DEV_COUNT] = {
@@ -350,11 +351,13 @@ static void imu_task(void *arg)
     while (1) {
         mpu9250_sample_t raw;
         memset(&raw, 0, sizeof(raw));
-        bool mpu_ok = (mpu9250_read(&s_mpu, &raw) == ESP_OK);
 
+        xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
+        bool mpu_ok = (mpu9250_read(&s_mpu, &raw) == ESP_OK);
         if (!mpu_ok) {
             (void)i2c_master_bus_reset(s_bus);
         }
+        xSemaphoreGive(s_i2c_mutex);
 
         /* 计算实际采样间隔（补偿调度抖动） */
         int64_t now_us = esp_timer_get_time();
@@ -413,17 +416,20 @@ static void sensor_task(void *arg)
     while (1) {
         /* SHT40 */
         float sht_t = 0.0f, sht_h = 0.0f;
-        bool sht_ok = (sht40_read(&s_sht, &sht_t, &sht_h) == ESP_OK);
-
         /* BMP280（温度 -> t_fine -> 气压） */
         float bmp_t = 0.0f, bmp_p = 0.0f, bmp_a = 0.0f;
         int32_t t_fine = 0;
-        bool bmp_ok = (bmp280_read(&s_bmp, &bmp_t, &bmp_p, &bmp_a, &t_fine) == ESP_OK);
+        bool sht_ok, bmp_ok;
+
+        xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
+        sht_ok = (sht40_read(&s_sht, &sht_t, &sht_h) == ESP_OK);
+        bmp_ok = (bmp280_read(&s_bmp, &bmp_t, &bmp_p, &bmp_a, &t_fine) == ESP_OK);
 
         /* 任一读取失败时复位总线，释放可能被拉低的 SDA */
         if (!sht_ok || !bmp_ok) {
             (void)i2c_master_bus_reset(s_bus);
         }
+        xSemaphoreGive(s_i2c_mutex);
 
         int64_t now_us = esp_timer_get_time();
 
@@ -463,7 +469,9 @@ static void display_task(void *arg)
         xSemaphoreGive(s_data_mutex);
 
         if (s_oled.present) {
+            xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
             display_render(&snapshot);
+            xSemaphoreGive(s_i2c_mutex);
         }
 
         vTaskDelay(pdMS_TO_TICKS(DISPLAY_PERIOD_MS));
@@ -517,6 +525,11 @@ void app_main(void)
     s_data_mutex = xSemaphoreCreateMutex();
     if (s_data_mutex == NULL) {
         ESP_LOGE(TAG, "互斥锁创建失败");
+        return;
+    }
+    s_i2c_mutex = xSemaphoreCreateMutex();
+    if (s_i2c_mutex == NULL) {
+        ESP_LOGE(TAG, "I2C 互斥锁创建失败");
         return;
     }
     memset(&s_data, 0, sizeof(s_data));
