@@ -1,0 +1,11 @@
+build
+sdkconfig
+sdkconfig.old
+managed_components
+
+
+
+.vscode/
+.opencode
+.reasonix/
+
