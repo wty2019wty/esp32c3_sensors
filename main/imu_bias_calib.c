@@ -9,6 +9,8 @@
 
 /* 校准采样数：100Hz 下约 2 秒（仅统计静止帧） */
 #define CALIB_SAMPLE_NUM        200
+/* 校准超时：100Hz 下 10s。持续运动/零偏过大时强制结束，避免姿态永不输出 */
+#define CALIB_TIMEOUT_FRAMES    1000
 
 /*
  * 上电校准期静止判据（尚无可靠零偏，用“绝对角速度 + 帧间变化”双重门槛）：
@@ -27,6 +29,12 @@
 #define STILL_RESID_THRES_DPS   0.6f
 #define STILL_DELTA_THRES_DPS   0.4f
 #define STILL_HOLD_FRAMES       30
+/*
+ * 慢速兜底跟踪的可恢复残差上限：残差超过 STILL_RESID_THRES_DPS 时，
+ * 只要仍在此范围内且帧间稳定，就用慢速低通把零偏拉回，避免温漂把残差
+ * 推出阈值后永久锁死（残差正是跟踪要修正的量）。
+ */
+#define STILL_RECOVER_THRES_DPS 2.5f
 
 /* 陀螺零偏跟踪低通系数：长时间静止后加快跟踪温漂 */
 #define TRACK_ALPHA_SLOW        0.002f
@@ -64,6 +72,7 @@ void imu_bias_calib_init(imu_bias_calib_t *s)
     }
 
     s->calib_sample_cnt = 0;
+    s->calib_total_cnt = 0;
     s->calib_phase = 0;
     s->prev_input = (mpu9250_sample_t){0};
     s->still_cnt = 0;
@@ -90,6 +99,10 @@ void imu_bias_calib_update(imu_bias_calib_t *s,
 
     if (s->calib_phase == 0) {
         /* ---------- 上电静止校准：仅累计“静止”样本求均值 ---------- */
+        if (s->calib_total_cnt < 0xFFFFu) {
+            s->calib_total_cnt++;
+        }
+
         float dx = input->gyro_x - s->prev_input.gyro_x;
         float dy = input->gyro_y - s->prev_input.gyro_y;
         float dz = input->gyro_z - s->prev_input.gyro_z;
@@ -117,23 +130,38 @@ void imu_bias_calib_update(imu_bias_calib_t *s,
             s->calib_sample_cnt++;
         }
 
-        if (s->calib_sample_cnt >= CALIB_SAMPLE_NUM) {
-            const float inv_n = 1.0f / (float)CALIB_SAMPLE_NUM;
+        /* 累计够静止样本，或等待超时（持续运动/零偏过大）时结束校准 */
+        bool calib_finish = (s->calib_sample_cnt >= CALIB_SAMPLE_NUM) ||
+                            (s->calib_total_cnt >= CALIB_TIMEOUT_FRAMES);
 
-            /* 陀螺仪零偏：静止时三轴角速度均值即为零偏 */
-            s->gyro_bias[0] = s->calib_gyro_sum[0] * inv_n;
-            s->gyro_bias[1] = s->calib_gyro_sum[1] * inv_n;
-            s->gyro_bias[2] = s->calib_gyro_sum[2] * inv_n;
+        if (calib_finish) {
+            if (s->calib_sample_cnt > 0) {
+                const float inv_n = 1.0f / (float)s->calib_sample_cnt;
 
-            /* 加速度计零偏：仅在接近水平静止时标定，Z 轴扣除 1g 重力 */
-            float mean_x = s->calib_acc_sum[0] * inv_n;
-            float mean_y = s->calib_acc_sum[1] * inv_n;
-            float mean_z = s->calib_acc_sum[2] * inv_n;
-            if (fabsf(mean_z) >= ACCEL_LEVEL_MIN_Z) {
-                s->accel_bias[0] = mean_x;
-                s->accel_bias[1] = mean_y;
-                s->accel_bias[2] = mean_z - (mean_z >= 0.0f ? 1.0f : -1.0f);
+                /* 陀螺仪零偏：静止时三轴角速度均值即为零偏 */
+                s->gyro_bias[0] = s->calib_gyro_sum[0] * inv_n;
+                s->gyro_bias[1] = s->calib_gyro_sum[1] * inv_n;
+                s->gyro_bias[2] = s->calib_gyro_sum[2] * inv_n;
+
+                /* 加速度计零偏：仅在接近水平静止时标定，Z 轴扣除 1g 重力 */
+                float mean_x = s->calib_acc_sum[0] * inv_n;
+                float mean_y = s->calib_acc_sum[1] * inv_n;
+                float mean_z = s->calib_acc_sum[2] * inv_n;
+                if (fabsf(mean_z) >= ACCEL_LEVEL_MIN_Z) {
+                    s->accel_bias[0] = mean_x;
+                    s->accel_bias[1] = mean_y;
+                    s->accel_bias[2] = mean_z - (mean_z >= 0.0f ? 1.0f : -1.0f);
+                } else {
+                    s->accel_bias[0] = 0.0f;
+                    s->accel_bias[1] = 0.0f;
+                    s->accel_bias[2] = 0.0f;
+                }
             } else {
+                /* 超时且从未捕获静止样本：零偏保持 0，
+                   由运行期慢速兜底跟踪逐步收敛，至少保证融合能启动 */
+                s->gyro_bias[0] = 0.0f;
+                s->gyro_bias[1] = 0.0f;
+                s->gyro_bias[2] = 0.0f;
                 s->accel_bias[0] = 0.0f;
                 s->accel_bias[1] = 0.0f;
                 s->accel_bias[2] = 0.0f;
@@ -159,21 +187,32 @@ void imu_bias_calib_update(imu_bias_calib_t *s,
         float resid_max = max_abs3(rx, ry, rz);
         const float still_delta_sq = STILL_DELTA_THRES_DPS * STILL_DELTA_THRES_DPS;
 
-        if (resid_max < STILL_RESID_THRES_DPS && delta_sq < still_delta_sq) {
+        /* 帧间稳定即视为“准静止”候选，用于计数与慢速兜底跟踪 */
+        bool delta_quiet = (delta_sq < still_delta_sq);
+        bool resid_ok = (resid_max < STILL_RESID_THRES_DPS);
+
+        if (delta_quiet) {
             if (s->still_cnt < 0xFFFFu) {
                 s->still_cnt++;
             }
         } else {
             s->still_cnt = 0;
-            s->still = false;
         }
 
-        /* 连续静止达到保持帧数后置位 */
-        s->still = (s->still_cnt >= STILL_HOLD_FRAMES);
+        /* 置位静止：帧间稳定持续 + 残差足够小（供 ZUPT / 高 Ki 使用） */
+        s->still = (s->still_cnt >= STILL_HOLD_FRAMES) && resid_ok;
 
-        if (s->still) {
-            float alpha = (s->still_cnt >= TRACK_FAST_AFTER_FRAMES)
-                              ? TRACK_ALPHA_FAST
+        /*
+         * 零偏跟踪：
+         *   - 残差小且已置位静止时按慢/快双速跟踪；
+         *   - 残差超阈值但仍在可恢复范围内时，仅用慢速兜底跟踪，
+         *     把温漂导致的零偏拉回，避免残差被永久锁死在阈值之上。
+         */
+        if (delta_quiet && resid_max < STILL_RECOVER_THRES_DPS) {
+            float alpha = s->still
+                              ? ((s->still_cnt >= TRACK_FAST_AFTER_FRAMES)
+                                     ? TRACK_ALPHA_FAST
+                                     : TRACK_ALPHA_SLOW)
                               : TRACK_ALPHA_SLOW;
             s->gyro_bias[0] += alpha * (input->gyro_x - s->gyro_bias[0]);
             s->gyro_bias[1] += alpha * (input->gyro_y - s->gyro_bias[1]);
