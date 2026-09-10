@@ -9,10 +9,27 @@
 #define MAHONY_RAD_TO_DEG   (57.29577951308232f)
 #define MAHONY_DEG_TO_RAD   (0.017453292519943295f)
 
+/* Mahony 积分反馈限幅（°/s）：防止加速度/磁场干扰把 integral_fb 灌飞 */
+#define MAHONY_INTEGRAL_LIMIT_DPS   2.0f
+/* 加速度模长有效区间（g）：偏离 1g 过多时认为存在线加速度/振动，削弱重力校正 */
+#define MAHONY_ACC_NORM_MIN         0.75f
+#define MAHONY_ACC_NORM_MAX         1.25f
+
 /* 快速平方根倒数（Newton 迭代） */
 static float mahony_inv_sqrt(float x)
 {
     return 1.0f / sqrtf(x);
+}
+
+static float mahony_clampf(float v, float lo, float hi)
+{
+    if (v < lo) {
+        return lo;
+    }
+    if (v > hi) {
+        return hi;
+    }
+    return v;
 }
 
 void mahony_init(mahony_t *m, float kp, float ki)
@@ -27,6 +44,15 @@ void mahony_init(mahony_t *m, float kp, float ki)
     m->integral_fb_x = 0.0f;
     m->integral_fb_y = 0.0f;
     m->integral_fb_z = 0.0f;
+    m->two_kp = 2.0f * kp;
+    m->two_ki = 2.0f * ki;
+}
+
+void mahony_set_gains(mahony_t *m, float kp, float ki)
+{
+    if (m == NULL) {
+        return;
+    }
     m->two_kp = 2.0f * kp;
     m->two_ki = 2.0f * ki;
 }
@@ -58,7 +84,16 @@ void mahony_update(mahony_t *m,
     float q0q0, q0q1, q0q2, q0q3, q1q1, q1q2, q1q3, q2q2, q2q3, q3q3;
 
     bool acc_valid = !((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f));
-    bool mag_valid = !((mx == 0.0f) && (my == 0.0f) && (mz == 0.0f));
+    if (acc_valid) {
+        /* 线加速度门控：|a| 明显偏离 1g 时不把加速度当重力参考 */
+        float acc_norm_sq = ax * ax + ay * ay + az * az;
+        float acc_norm = sqrtf(acc_norm_sq);
+        if (acc_norm < MAHONY_ACC_NORM_MIN || acc_norm > MAHONY_ACC_NORM_MAX) {
+            acc_valid = false;
+        }
+    }
+
+    bool mag_valid = acc_valid && !((mx == 0.0f) && (my == 0.0f) && (mz == 0.0f));
 
     if (acc_valid) {
         /* 归一化加速度计 */
@@ -115,11 +150,15 @@ void mahony_update(mahony_t *m,
             half_ez += (mx * half_wy - my * half_wx);
         }
 
-        /* 积分反馈 */
+        /* 积分反馈 + 限幅（内部存 rad/s，限制值也换算到 rad/s） */
         if (m->two_ki > 0.0f) {
-            m->integral_fb_x += m->two_ki * half_ex * dt;
-            m->integral_fb_y += m->two_ki * half_ey * dt;
-            m->integral_fb_z += m->two_ki * half_ez * dt;
+            const float lim = MAHONY_INTEGRAL_LIMIT_DPS * MAHONY_DEG_TO_RAD;
+            m->integral_fb_x = mahony_clampf(m->integral_fb_x + m->two_ki * half_ex * dt,
+                                             -lim, lim);
+            m->integral_fb_y = mahony_clampf(m->integral_fb_y + m->two_ki * half_ey * dt,
+                                             -lim, lim);
+            m->integral_fb_z = mahony_clampf(m->integral_fb_z + m->two_ki * half_ez * dt,
+                                             -lim, lim);
             gx += m->integral_fb_x;
             gy += m->integral_fb_y;
             gz += m->integral_fb_z;

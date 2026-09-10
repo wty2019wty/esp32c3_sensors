@@ -192,15 +192,20 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
     }
     vTaskDelay(pdMS_TO_TICKS(50));  /* 唤醒后稳定时间 */
 
-    /* 采样率与量程配置 */
+    /* 采样率与量程配置：硬件 DLPF 先压噪，再由软件二阶低通细滤 */
     (void)mpu_write_reg(mpu, MPU9250_REG_SMPLRT_DIV, MPU9250_SMPLRT_DIV_100HZ);
-    (void)mpu_write_reg(mpu, MPU9250_REG_CONFIG, 0x03);  /* DLPF 41Hz */
+    (void)mpu_write_reg(mpu, MPU9250_REG_CONFIG, MPU9250_CONFIG_DLPF_G20HZ);
     err = mpu_write_reg(mpu, MPU9250_REG_ACCEL_CONFIG, MPU9250_ACCEL_FS_SEL_4G);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "配置加速度计量程失败: %s", esp_err_to_name(err));
         return err;
     }
-    err = mpu_write_reg(mpu, MPU9250_REG_GYRO_CONFIG, MPU9250_GYRO_FS_SEL_2000);
+    err = mpu_write_reg(mpu, MPU9250_REG_ACCEL_CONFIG2, MPU9250_ACCEL_CONFIG2_DLPF_A21);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "配置加速度 DLPF 失败: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = mpu_write_reg(mpu, MPU9250_REG_GYRO_CONFIG, MPU9250_GYRO_FS_SEL_500);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "配置陀螺仪量程失败: %s", esp_err_to_name(err));
         return err;
@@ -304,26 +309,29 @@ esp_err_t mpu9250_read(mpu9250_t *mpu, mpu9250_sample_t *sample)
 
     memset(sample, 0, sizeof(*sample));
 
-    /* 加速度计：0x3B~0x40，±4g -> /8192 */
-    uint8_t d[MPU9250_AXIS_BYTES] = {0};
+    /*
+     * 加速度 + 温度 + 陀螺仪一次突发读（0x3B~0x48，14 字节）。
+     * 相比分两次读：
+     *   1) 三者来自同一采样时刻，姿态融合不再受读间延迟影响；
+     *   2) 减少一次 I2C 事务，100Hz 周期余量更大。
+     */
+    uint8_t d[MPU9250_BURST_BYTES] = {0};
     esp_err_t err = mpu_read_regs(mpu, MPU9250_REG_ACCEL_XOUT_H, d, sizeof(d));
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "读取加速度计失败: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "读取 IMU 突发数据失败: %s", esp_err_to_name(err));
         return err;
     }
+
     sample->acc_x = (float)(int16_t)(((uint16_t)d[0] << 8) | d[1]) / MPU9250_ACCEL_LSB_PER_G;
     sample->acc_y = (float)(int16_t)(((uint16_t)d[2] << 8) | d[3]) / MPU9250_ACCEL_LSB_PER_G;
     sample->acc_z = (float)(int16_t)(((uint16_t)d[4] << 8) | d[5]) / MPU9250_ACCEL_LSB_PER_G;
 
-    /* 陀螺仪：0x43~0x48，±2000dps -> /16.384 */
-    err = mpu_read_regs(mpu, MPU9250_REG_GYRO_XOUT_H, d, sizeof(d));
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "读取陀螺仪失败: %s", esp_err_to_name(err));
-        return err;
-    }
-    sample->gyro_x = (float)(int16_t)(((uint16_t)d[0] << 8) | d[1]) / MPU9250_GYRO_LSB_PER_DPS;
-    sample->gyro_y = (float)(int16_t)(((uint16_t)d[2] << 8) | d[3]) / MPU9250_GYRO_LSB_PER_DPS;
-    sample->gyro_z = (float)(int16_t)(((uint16_t)d[4] << 8) | d[5]) / MPU9250_GYRO_LSB_PER_DPS;
+    int16_t temp_raw = (int16_t)(((uint16_t)d[6] << 8) | d[7]);
+    sample->temp_c = (float)temp_raw / MPU9250_TEMP_SENSITIVITY + MPU9250_TEMP_OFFSET_DEGC;
+
+    sample->gyro_x = (float)(int16_t)(((uint16_t)d[8] << 8) | d[9]) / MPU9250_GYRO_LSB_PER_DPS;
+    sample->gyro_y = (float)(int16_t)(((uint16_t)d[10] << 8) | d[11]) / MPU9250_GYRO_LSB_PER_DPS;
+    sample->gyro_z = (float)(int16_t)(((uint16_t)d[12] << 8) | d[13]) / MPU9250_GYRO_LSB_PER_DPS;
 
     /* 磁力计为可选 */
     if (mpu->mag_present) {

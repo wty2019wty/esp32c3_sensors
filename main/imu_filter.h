@@ -7,6 +7,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "mpu9250.h"
@@ -20,14 +21,13 @@ typedef struct {
     float a2;
 } imu_filter_coeff_t;
 
-/* 单个滤波器状态（输入/输出历史 + 预热计数） */
+/* 单个滤波器状态（输入/输出历史；首帧用真实采样播种，避免直通瞬态） */
 typedef struct {
     float x1;
     float x2;
     float y1;
     float y2;
-    uint16_t warmup_count;  /* 已预热帧数 */
-    uint16_t warmup_limit;  /* 预热帧数上限，期间直接输出原始值 */
+    bool seeded;    /* 首帧后为 true */
 } imu_filter_biquad_t;
 
 /* 滤波器组：加速度三轴 + 陀螺仪三轴各一个 */
@@ -45,13 +45,11 @@ typedef struct {
  * @param[in]  sample_hz       采样频率（Hz），应与实际 IMU 任务频率一致
  * @param[in]  accel_cutoff_hz 加速度截止频率（Hz）
  * @param[in]  gyro_cutoff_hz  陀螺仪截止频率（Hz）
- * @param[in]  warmup_limit    预热帧数，期间直接输出原始值（避免初始瞬态）
  */
 void imu_filter_init(imu_filter_t *f,
                      float sample_hz,
                      float accel_cutoff_hz,
-                     float gyro_cutoff_hz,
-                     uint16_t warmup_limit);
+                     float gyro_cutoff_hz);
 
 /**
  * @brief 对一帧采样做滤波

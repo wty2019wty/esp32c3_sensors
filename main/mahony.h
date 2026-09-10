@@ -33,6 +33,15 @@ typedef struct {
 void mahony_init(mahony_t *m, float kp, float ki);
 
 /**
+ * @brief 在线调整融合增益（静止时提高 Ki 加速残余零偏收敛）
+ *
+ * @param[in,out] m  融合器状态
+ * @param[in]  kp 比例增益
+ * @param[in]  ki 积分增益
+ */
+void mahony_set_gains(mahony_t *m, float kp, float ki);
+
+/**
  * @brief 更新一次姿态解算
  *
  * @param[in,out] m   融合器状态

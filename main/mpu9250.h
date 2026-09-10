@@ -20,8 +20,10 @@
 #define MPU9250_REG_CONFIG              0x1A
 #define MPU9250_REG_GYRO_CONFIG         0x1B
 #define MPU9250_REG_ACCEL_CONFIG        0x1C
+#define MPU9250_REG_ACCEL_CONFIG2       0x1D    /* 加速度 DLPF / FCHOICE_B */
 #define MPU9250_REG_INT_PIN_CFG         0x37    /* 含 I2C_BYPASS_EN */
 #define MPU9250_REG_ACCEL_XOUT_H        0x3B    /* 0x3B~0x40 加速度 */
+#define MPU9250_REG_TEMP_OUT_H          0x41    /* 0x41~0x42 片内温度 */
 #define MPU9250_REG_GYRO_XOUT_H         0x43    /* 0x43~0x48 陀螺仪 */
 #define MPU9250_REG_USER_CTRL           0x6A    /* 含 I2C_MST_EN */
 #define MPU9250_REG_PWR_MGMT_1          0x6B
@@ -61,8 +63,14 @@
 #define MPU9250_USER_CTRL_I2C_MST_OFF   0x00    /* 关闭内部 I2C 主机 */
 #define MPU9250_INT_PIN_CFG_BYPASS      0x02    /* 使能 I2C Bypass，暴露 AK8963 */
 #define MPU9250_ACCEL_FS_SEL_4G         0x08    /* ±4g  (AFS_SEL=01) */
-#define MPU9250_GYRO_FS_SEL_2000        0x18    /* ±2000dps (FS_SEL=11) */
+#define MPU9250_GYRO_FS_SEL_500         0x08    /* ±500dps (FS_SEL=01)，分辨率更高 */
 #define MPU9250_SMPLRT_DIV_100HZ        0x09    /* 采样率 = 1000/(1+9) = 100Hz */
+
+/* 硬件 DLPF：在软件低通之前先压高频噪声。
+ * CONFIG  DLPF_CFG=4 → 陀螺 20Hz 带宽（比默认 41Hz 更安静，仍适合手持姿态）。
+ * ACCEL_CONFIG2  A_DLPF_CFG=4 → 加速度 21Hz，与陀螺带宽匹配。 */
+#define MPU9250_CONFIG_DLPF_G20HZ      0x04
+#define MPU9250_ACCEL_CONFIG2_DLPF_A21 0x04
 
 /* 磁力计连续测量模式 2（100Hz）+ 16 位输出。
  * 注意：AK8963 CNTL1 的 bit4 为输出位宽选择（1=16bit）。
@@ -74,11 +82,15 @@
  * 磁场读数 = 原始 LSB * (0.15 uT/LSB) * (Fuse ROM 每轴调整值)。
  * 参考：AK8963 手册，(adj-128)/256 + 1 为出厂灵敏度修正系数。 */
 #define MPU9250_ACCEL_LSB_PER_G         8192.0f     /* ±4g  */
-#define MPU9250_GYRO_LSB_PER_DPS        16.384f     /* ±2000dps */
+#define MPU9250_GYRO_LSB_PER_DPS        65.5f       /* ±500dps */
 #define MPU9250_MAG_UT_PER_LSB          0.15f       /* 16 位输出 */
 
-/* 数据长度 */
-#define MPU9250_AXIS_BYTES              6           /* 三轴各 2 字节 */
+/* 片内温度：T = raw / 333.87 + 21  (℃)，见 Register Map TEMP_OUT */
+#define MPU9250_TEMP_SENSITIVITY        333.87f
+#define MPU9250_TEMP_OFFSET_DEGC        21.0f
+
+/* 数据长度：accel(6) + temp(2) + gyro(6) 一次突发读，保证同帧一致 */
+#define MPU9250_BURST_BYTES             14
 #define AK8963_BURST_BYTES              7           /* HXL..HZH + ST2（小端序） */
 
 /* I2C 操作超时（毫秒） */
@@ -108,6 +120,7 @@ typedef struct {
     float mag_x;    /* μT */
     float mag_y;
     float mag_z;
+    float temp_c;   /* 片内温度 ℃，用于陀螺零偏温漂补偿 */
 } mpu9250_sample_t;
 
 /**
