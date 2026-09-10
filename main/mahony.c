@@ -31,6 +31,15 @@ void mahony_init(mahony_t *m, float kp, float ki)
     m->two_ki = 2.0f * ki;
 }
 
+void mahony_set_gains(mahony_t *m, float kp, float ki)
+{
+    if (m == NULL) {
+        return;
+    }
+    m->two_kp = 2.0f * kp;
+    m->two_ki = 2.0f * ki;
+}
+
 void mahony_update(mahony_t *m,
                    float gx, float gy, float gz,
                    float ax, float ay, float az,

@@ -61,7 +61,7 @@
 #define MPU9250_USER_CTRL_I2C_MST_OFF   0x00    /* 关闭内部 I2C 主机 */
 #define MPU9250_INT_PIN_CFG_BYPASS      0x02    /* 使能 I2C Bypass，暴露 AK8963 */
 #define MPU9250_ACCEL_FS_SEL_4G         0x08    /* ±4g  (AFS_SEL=01) */
-#define MPU9250_GYRO_FS_SEL_2000        0x18    /* ±2000dps (FS_SEL=11) */
+#define MPU9250_GYRO_FS_SEL_500         0x08    /* ±500dps (FS_SEL=01)，分辨率更高 */
 #define MPU9250_SMPLRT_DIV_100HZ        0x09    /* 采样率 = 1000/(1+9) = 100Hz */
 
 /* 磁力计连续测量模式 2（100Hz）+ 16 位输出。
@@ -74,7 +74,7 @@
  * 磁场读数 = 原始 LSB * (0.15 uT/LSB) * (Fuse ROM 每轴调整值)。
  * 参考：AK8963 手册，(adj-128)/256 + 1 为出厂灵敏度修正系数。 */
 #define MPU9250_ACCEL_LSB_PER_G         8192.0f     /* ±4g  */
-#define MPU9250_GYRO_LSB_PER_DPS        16.384f     /* ±2000dps */
+#define MPU9250_GYRO_LSB_PER_DPS        65.5f       /* ±500dps */
 #define MPU9250_MAG_UT_PER_LSB          0.15f       /* 16 位输出 */
 
 /* 数据长度 */

@@ -1,10 +1,12 @@
 /*
  * IMU 偏置校准与静止零偏跟踪
  *
- * 移植自 stm32f103 工程的 imu_bias_calib.c：
- *   1) 上电后采集若干帧静止数据，求陀螺仪零偏（°/s）与加速度计零偏（g）；
- *   2) 运行期当检测到设备近似静止时，对陀螺零偏做低通跟踪，
- *      抑制温漂/零偏随时间的缓慢变化。
+ * 移植并强化自 stm32f103 工程的 imu_bias_calib.c：
+ *   1) 上电后采集若干帧“静止”数据，求陀螺仪零偏（°/s）与加速度计零偏（g）；
+ *      校准期间若检测到运动则丢弃样本，避免把角速度当成零偏；
+ *   2) 运行期用“残差幅值 + 帧间变化”双重判据识别静止，对陀螺零偏做
+ *      自适应低通跟踪，抑制温漂/零偏随时间的缓慢变化；
+ *   3) 暴露静止标志，供姿态融合做自适应增益与 ZUPT。
  *
  * 说明：加速度计零偏仅在“接近水平静止”时才会标定，避免设备倾斜放置时
  *       误把重力分量当成零偏而破坏姿态方向（这是相对原 STM32 实现的加固）。
@@ -27,6 +29,8 @@ typedef struct {
 
     mpu9250_sample_t prev_input; /* 上一帧输入，用于静止检测 */
     uint8_t calib_phase;         /* 0: 正在校准, 1: 校准完成并跟踪 */
+    uint16_t still_cnt;          /* 连续静止帧计数 */
+    bool still;                  /* 当前是否判定为静止 */
 } imu_bias_calib_t;
 
 /**
@@ -49,3 +53,10 @@ void imu_bias_calib_update(imu_bias_calib_t *s,
  * @brief 校准是否已完成（true 表示已进入运行期跟踪）
  */
 bool imu_bias_calib_is_done(const imu_bias_calib_t *s);
+
+/**
+ * @brief 当前是否判定为静止（连续满足静止判据达到保持帧数）
+ *
+ * 校准完成前恒为 false。供 Mahony 自适应增益 / ZUPT 使用。
+ */
+bool imu_bias_calib_is_still(const imu_bias_calib_t *s);

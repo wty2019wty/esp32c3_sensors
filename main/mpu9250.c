@@ -200,7 +200,7 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
         ESP_LOGE(TAG, "配置加速度计量程失败: %s", esp_err_to_name(err));
         return err;
     }
-    err = mpu_write_reg(mpu, MPU9250_REG_GYRO_CONFIG, MPU9250_GYRO_FS_SEL_2000);
+    err = mpu_write_reg(mpu, MPU9250_REG_GYRO_CONFIG, MPU9250_GYRO_FS_SEL_500);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "配置陀螺仪量程失败: %s", esp_err_to_name(err));
         return err;
@@ -315,7 +315,7 @@ esp_err_t mpu9250_read(mpu9250_t *mpu, mpu9250_sample_t *sample)
     sample->acc_y = (float)(int16_t)(((uint16_t)d[2] << 8) | d[3]) / MPU9250_ACCEL_LSB_PER_G;
     sample->acc_z = (float)(int16_t)(((uint16_t)d[4] << 8) | d[5]) / MPU9250_ACCEL_LSB_PER_G;
 
-    /* 陀螺仪：0x43~0x48，±2000dps -> /16.384 */
+    /* 陀螺仪：0x43~0x48，±500dps -> /65.5 */
     err = mpu_read_regs(mpu, MPU9250_REG_GYRO_XOUT_H, d, sizeof(d));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "读取陀螺仪失败: %s", esp_err_to_name(err));

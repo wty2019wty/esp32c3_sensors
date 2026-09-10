@@ -54,6 +54,10 @@ static const char *TAG = "main";
 
 #define MAHONY_KP               1.0f
 #define MAHONY_KI               0.0005f
+#define MAHONY_KI_STILL         0.005f          /* 静止时提高 Ki，加速残余零偏收敛 */
+/* ZUPT：静止且补偿后残差角速度低于该值时，融合输入置零，避免噪声积分成 Yaw 漂移 */
+#define IMU_ZUPT_RESID_DPS      0.25f
+#define IMU_ZUPT_RESID_SQ       (IMU_ZUPT_RESID_DPS * IMU_ZUPT_RESID_DPS)
 
 /* IMU 前端滤波与零偏校准（移植自 stm32f103 提高陀螺仪精度的方案） */
 #define IMU_SAMPLE_HZ           (1000.0f / IMU_PERIOD_MS)  /* 100Hz */
@@ -346,6 +350,9 @@ static void imu_task(void *arg)
     imu_bias_calib_t calib;
     imu_bias_calib_init(&calib);
 
+    /* 校准完成前不喂融合器：避免未补偿零偏先把四元数积分脏 */
+    bool fusion_armed = false;
+
     int64_t last_us = esp_timer_get_time();
 
     while (1) {
@@ -373,11 +380,39 @@ static void imu_task(void *arg)
         if (mpu_ok) {
             imu_filter_process(&raw, &filtered, &filter);
             imu_bias_calib_update(&calib, &filtered, &fused_in);
-            mahony_update(&ahrs,
-                          fused_in.gyro_x, fused_in.gyro_y, fused_in.gyro_z,
-                          fused_in.acc_x, fused_in.acc_y, fused_in.acc_z,
-                          fused_in.mag_x, fused_in.mag_y, fused_in.mag_z,
-                          dt);
+
+            bool calib_done = imu_bias_calib_is_done(&calib);
+            if (calib_done && !fusion_armed) {
+                /* 零偏就绪后再从单位四元数起步，丢弃校准期的积分历史 */
+                mahony_init(&ahrs, MAHONY_KP, MAHONY_KI);
+                fusion_armed = true;
+            }
+
+            if (fusion_armed) {
+                bool still = imu_bias_calib_is_still(&calib);
+                mahony_set_gains(&ahrs, MAHONY_KP,
+                                 still ? MAHONY_KI_STILL : MAHONY_KI);
+
+                float gx = fused_in.gyro_x;
+                float gy = fused_in.gyro_y;
+                float gz = fused_in.gyro_z;
+
+                /* ZUPT：静止且残差很小时强制角速度为 0，抑制 Yaw 噪声积分 */
+                if (still) {
+                    float r2 = gx * gx + gy * gy + gz * gz;
+                    if (r2 < IMU_ZUPT_RESID_SQ) {
+                        gx = 0.0f;
+                        gy = 0.0f;
+                        gz = 0.0f;
+                    }
+                }
+
+                mahony_update(&ahrs,
+                              gx, gy, gz,
+                              fused_in.acc_x, fused_in.acc_y, fused_in.acc_z,
+                              fused_in.mag_x, fused_in.mag_y, fused_in.mag_z,
+                              dt);
+            }
         }
 
         float roll = 0.0f, pitch = 0.0f, yaw = 0.0f;
