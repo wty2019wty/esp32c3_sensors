@@ -52,18 +52,19 @@ static const char *TAG = "main";
 #define I2C_ADDR_MPU9250        0x68
 #define I2C_ADDR_BMP280         0x76
 
-#define MAHONY_KP               1.0f
+#define MAHONY_KP               0.8f
+#define MAHONY_KP_STILL         1.0f            /* 静止时更信加速度，加速 Roll/Pitch 收敛 */
 #define MAHONY_KI               0.0005f
 #define MAHONY_KI_STILL         0.005f          /* 静止时提高 Ki，加速残余零偏收敛 */
 /* ZUPT：静止且补偿后残差角速度低于该值时，融合输入置零，避免噪声积分成 Yaw 漂移 */
-#define IMU_ZUPT_RESID_DPS      0.25f
+#define IMU_ZUPT_RESID_DPS      0.20f
 #define IMU_ZUPT_RESID_SQ       (IMU_ZUPT_RESID_DPS * IMU_ZUPT_RESID_DPS)
 
 /* IMU 前端滤波与零偏校准（移植自 stm32f103 提高陀螺仪精度的方案） */
 #define IMU_SAMPLE_HZ           (1000.0f / IMU_PERIOD_MS)  /* 100Hz */
-#define IMU_ACCEL_CUTOFF_HZ     30.0f           /* 加速度二阶低通截止频率 */
-#define IMU_GYRO_CUTOFF_HZ      25.0f           /* 陀螺仪二阶低通截止频率 */
-#define IMU_FILTER_WARMUP       200             /* 滤波器预热帧数（100Hz 下约 2s） */
+/* 硬件 DLPF 已把陀螺压到 20Hz、加速度 21Hz，软件再低通一档细滤 */
+#define IMU_ACCEL_CUTOFF_HZ     20.0f           /* 加速度二阶低通截止频率 */
+#define IMU_GYRO_CUTOFF_HZ      16.0f           /* 陀螺仪二阶低通截止频率 */
 
 #define DISPLAY_COLS            21
 #define DISPLAY_ROWS            8
@@ -345,7 +346,7 @@ static void imu_task(void *arg)
 
     imu_filter_t filter;
     imu_filter_init(&filter, IMU_SAMPLE_HZ,
-                    IMU_ACCEL_CUTOFF_HZ, IMU_GYRO_CUTOFF_HZ, IMU_FILTER_WARMUP);
+                    IMU_ACCEL_CUTOFF_HZ, IMU_GYRO_CUTOFF_HZ);
 
     imu_bias_calib_t calib;
     imu_bias_calib_init(&calib);
@@ -353,6 +354,7 @@ static void imu_task(void *arg)
     /* 校准完成前不喂融合器：避免未补偿零偏先把四元数积分脏 */
     bool fusion_armed = false;
 
+    TickType_t last_wake = xTaskGetTickCount();
     int64_t last_us = esp_timer_get_time();
 
     while (1) {
@@ -390,8 +392,11 @@ static void imu_task(void *arg)
 
             if (fusion_armed) {
                 bool still = imu_bias_calib_is_still(&calib);
-                mahony_set_gains(&ahrs, MAHONY_KP,
-                                 still ? MAHONY_KI_STILL : MAHONY_KI);
+
+                /* 静止时提高 Kp/Ki；运动时压低 Kp，减少线加速度对姿态的污染 */
+                float kp = still ? MAHONY_KP_STILL : MAHONY_KP;
+                float ki = still ? MAHONY_KI_STILL : MAHONY_KI;
+                mahony_set_gains(&ahrs, kp, ki);
 
                 float gx = fused_in.gyro_x;
                 float gy = fused_in.gyro_y;
@@ -437,7 +442,8 @@ static void imu_task(void *arg)
         s_data.imu_calibrated = imu_bias_calib_is_done(&calib);
         xSemaphoreGive(s_data_mutex);
 
-        vTaskDelay(pdMS_TO_TICKS(IMU_PERIOD_MS));
+        /* 固定相位延时：补偿本轮 I2C/计算耗时，保证 100Hz 周期稳定 */
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(IMU_PERIOD_MS));
     }
 }
 

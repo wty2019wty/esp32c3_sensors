@@ -16,7 +16,7 @@ static void imu_filter_biquad_reset(imu_filter_biquad_t *s)
     s->x2 = 0.0f;
     s->y1 = 0.0f;
     s->y2 = 0.0f;
-    s->warmup_count = 0;
+    s->seeded = false;
 }
 
 /*
@@ -49,23 +49,28 @@ static void imu_filter_design_lp2(float sample_hz,
     coeff->a2 = (1.0f - 2.0f * cos_term * ohm + ohm * ohm) / c;
 }
 
-/* 单轴处理：预热期内直通，之后执行差分方程 */
+/*
+ * 单轴处理：首帧用真实采样播种状态（避免从 0 爬升的瞬态），
+ * 之后从第 2 帧起就执行差分方程，不再有“直通期 → 滤波期”的跳变。
+ */
 static float imu_filter_biquad_process(float input,
                                        imu_filter_biquad_t *s,
                                        const imu_filter_coeff_t *coeff)
 {
-    float y;
-
-    if (s->warmup_count < s->warmup_limit) {
-        y = input;
-        s->warmup_count++;
-    } else {
-        y = coeff->b0 * input
-          + coeff->b1 * s->x1
-          + coeff->b2 * s->x2
-          - coeff->a1 * s->y1
-          - coeff->a2 * s->y2;
+    if (!s->seeded) {
+        s->x1 = input;
+        s->x2 = input;
+        s->y1 = input;
+        s->y2 = input;
+        s->seeded = true;
+        return input;
     }
+
+    float y = coeff->b0 * input
+            + coeff->b1 * s->x1
+            + coeff->b2 * s->x2
+            - coeff->a1 * s->y1
+            - coeff->a2 * s->y2;
 
     s->x2 = s->x1;
     s->x1 = input;
@@ -78,8 +83,7 @@ static float imu_filter_biquad_process(float input,
 void imu_filter_init(imu_filter_t *f,
                      float sample_hz,
                      float accel_cutoff_hz,
-                     float gyro_cutoff_hz,
-                     uint16_t warmup_limit)
+                     float gyro_cutoff_hz)
 {
     if (f == NULL) {
         return;
@@ -87,11 +91,9 @@ void imu_filter_init(imu_filter_t *f,
 
     for (int i = 0; i < 3; i++) {
         imu_filter_biquad_reset(&f->accel_state[i]);
-        f->accel_state[i].warmup_limit = warmup_limit;
         imu_filter_design_lp2(sample_hz, accel_cutoff_hz, &f->accel_coeff[i]);
 
         imu_filter_biquad_reset(&f->gyro_state[i]);
-        f->gyro_state[i].warmup_limit = warmup_limit;
         imu_filter_design_lp2(sample_hz, gyro_cutoff_hz, &f->gyro_coeff[i]);
     }
 }
@@ -112,8 +114,9 @@ void imu_filter_process(const mpu9250_sample_t *in,
     out->gyro_y = imu_filter_biquad_process(in->gyro_y, &f->gyro_state[1], &f->gyro_coeff[1]);
     out->gyro_z = imu_filter_biquad_process(in->gyro_z, &f->gyro_state[2], &f->gyro_coeff[2]);
 
-    /* 磁力计不滤波，原样透传 */
+    /* 磁力计不滤波，温度原样透传 */
     out->mag_x = in->mag_x;
     out->mag_y = in->mag_y;
     out->mag_z = in->mag_z;
+    out->temp_c = in->temp_c;
 }
