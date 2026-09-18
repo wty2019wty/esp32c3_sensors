@@ -192,7 +192,7 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus, uint32_t scl
     vTaskDelay(pdMS_TO_TICKS(50));  /* 唤醒后稳定时间 */
 
     /* 采样率与量程配置：硬件 DLPF 先压噪，再由软件二阶低通细滤 */
-    (void)mpu_write_reg(mpu, MPU9250_REG_SMPLRT_DIV, MPU9250_SMPLRT_DIV_100HZ);
+    (void)mpu_write_reg(mpu, MPU9250_REG_SMPLRT_DIV, MPU9250_SMPLRT_DIV_200HZ);
     (void)mpu_write_reg(mpu, MPU9250_REG_CONFIG, MPU9250_CONFIG_DLPF_G20HZ);
     err = mpu_write_reg(mpu, MPU9250_REG_ACCEL_CONFIG, MPU9250_ACCEL_FS_SEL_4G);
     if (err != ESP_OK) {

@@ -64,7 +64,9 @@
 #define MPU9250_INT_PIN_CFG_BYPASS      0x02    /* 使能 I2C Bypass，暴露 AK8963 */
 #define MPU9250_ACCEL_FS_SEL_4G         0x08    /* ±4g  (AFS_SEL=01) */
 #define MPU9250_GYRO_FS_SEL_500         0x08    /* ±500dps (FS_SEL=01)，分辨率更高 */
-#define MPU9250_SMPLRT_DIV_100HZ        0x09    /* 采样率 = 1000/(1+9) = 100Hz */
+/* ODR = 1000 / (1 + SMPLRT_DIV)（DLPF 开启时陀螺输出率 1kHz）
+ * SMPLRT_DIV=4 → 200Hz，与 IMU_PERIOD_MS=5 对齐 */
+#define MPU9250_SMPLRT_DIV_200HZ        0x04
 
 /* 硬件 DLPF：在软件低通之前先压高频噪声。
  * CONFIG  DLPF_CFG=4 → 陀螺 20Hz 带宽（比默认 41Hz 更安静，仍适合手持姿态）。

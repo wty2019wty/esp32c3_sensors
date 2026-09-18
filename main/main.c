@@ -41,7 +41,7 @@ static const char *TAG = "main";
 #define DISPLAY_TASK_PRIORITY   3
 #define TASK_STACK_SIZE         4096
 #define SENSOR_PERIOD_MS        50              /* 温湿度/气压采样周期：50ms（20Hz） */
-#define IMU_PERIOD_MS           10              /* IMU 采样周期：10ms（100Hz，对齐 MPU ODR） */
+#define IMU_PERIOD_MS           5               /* IMU 采样周期：5ms（200Hz，对齐 MPU ODR） */
 #define DISPLAY_PERIOD_MS       20              /* 刷新周期：20ms（约 50 FPS，脏页刷新） */
 
 #define I2C_DEV_COUNT           4
@@ -73,7 +73,7 @@ typedef struct {
     int32_t t_fine;         /* BMP280 内部中间变量 */
     bool  bmp280_valid;
 
-    /* MPU9250：经 imu_algo 优化链后的物理量（滤波 + 零偏补偿） */
+    /* MPU9250：A/G/M 显示驱动换算后的原始物理量（无软件滤波/零偏） */
     float acc_x, acc_y, acc_z;      /* g */
     float gyro_x, gyro_y, gyro_z;   /* °/s */
     float mag_x, mag_y, mag_z;      /* μT */
@@ -268,14 +268,14 @@ static void display_render(const sensor_data_t *d)
     snprintf(line, sizeof(line), "ALT %sm I2C:%s", a, i2c);
     ssd1315_draw_string(&s_oled, 2, 0, line);
 
-    /* Line 3: 加速度计（A，g，滤波+零偏补偿后） */
+    /* Line 3: 加速度计（A，g，驱动原始值） */
     fmt_field(a, sizeof(a), d->mpu9250_valid, d->acc_x, 6);
     fmt_field(b, sizeof(b), d->mpu9250_valid, d->acc_y, 6);
     fmt_field(c, sizeof(c), d->mpu9250_valid, d->acc_z, 6);
     snprintf(line, sizeof(line), "A%s %s %s", a, b, c);
     ssd1315_draw_string(&s_oled, 3, 0, line);
 
-    /* Line 4: 陀螺仪（G，°/s，滤波+零偏补偿后） */
+    /* Line 4: 陀螺仪（G，°/s，驱动原始值） */
     fmt_field(a, sizeof(a), d->mpu9250_valid, d->gyro_x, 6);
     fmt_field(b, sizeof(b), d->mpu9250_valid, d->gyro_y, 6);
     fmt_field(c, sizeof(c), d->mpu9250_valid, d->gyro_z, 6);
@@ -320,13 +320,10 @@ static void display_render(const sensor_data_t *d)
 /* ---------------- 任务 ---------------- */
 
 /**
- * @brief IMU 任务：100Hz 读取 MPU9250，走 imu_algo 优化链后写入共享数据
+ * @brief IMU 任务：200Hz 读取 MPU9250
  *
- * 数据链（移植自 stm32f103 Task_pm6500_Read）：
- *   驱动突发读 → 二阶低通滤波 → 零偏校准/跟踪 → Mahony 六轴姿态
- *
- * 硬件 DLPF（陀螺 20Hz / 加速度 21Hz）仍在驱动中配置，与软件低通叠加。
- * 校准完成前姿态角也会输出，但零偏尚未收敛，显示与日志会标记 calib 状态。
+ * 显示路径：A/G/M 写驱动换算后的原始物理量（仅硬件 DLPF）。
+ * 算法路径：同一帧 raw 送入 imu_algo（滤波→零偏→Mahony），仅用于姿态角 R/P/Y。
  */
 static void imu_task(void *arg)
 {
@@ -348,6 +345,7 @@ static void imu_task(void *arg)
         }
         xSemaphoreGive(s_i2c_mutex);
 
+        /* 姿态走优化链；显示的 A/G/M 不用 out */
         bool pipe_ok = false;
         if (mpu_ok) {
             pipe_ok = imu_pipeline_process(&s_imu_pipe, &raw, &out);
@@ -367,16 +365,20 @@ static void imu_task(void *arg)
         }
 
         xSemaphoreTake(s_data_mutex, portMAX_DELAY);
+        if (mpu_ok) {
+            s_data.acc_x = raw.acc_x;
+            s_data.acc_y = raw.acc_y;
+            s_data.acc_z = raw.acc_z;
+            s_data.gyro_x = raw.gyro_x;
+            s_data.gyro_y = raw.gyro_y;
+            s_data.gyro_z = raw.gyro_z;
+            s_data.mag_x = raw.mag_x;
+            s_data.mag_y = raw.mag_y;
+            s_data.mag_z = raw.mag_z;
+        }
+        s_data.mpu9250_valid = mpu_ok;
+
         if (pipe_ok) {
-            s_data.acc_x = out.acc_x;
-            s_data.acc_y = out.acc_y;
-            s_data.acc_z = out.acc_z;
-            s_data.gyro_x = out.gyro_x;
-            s_data.gyro_y = out.gyro_y;
-            s_data.gyro_z = out.gyro_z;
-            s_data.mag_x = out.mag_x;
-            s_data.mag_y = out.mag_y;
-            s_data.mag_z = out.mag_z;
             s_data.roll_deg = s_imu_pipe.attitude.roll_deg;
             s_data.pitch_deg = s_imu_pipe.attitude.pitch_deg;
             s_data.yaw_deg = s_imu_pipe.attitude.yaw_deg;
@@ -385,7 +387,6 @@ static void imu_task(void *arg)
         } else {
             s_data.imu_att_valid = false;
         }
-        s_data.mpu9250_valid = mpu_ok;
         xSemaphoreGive(s_data_mutex);
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(IMU_PERIOD_MS));
@@ -547,8 +548,8 @@ void app_main(void)
         ESP_LOGE(TAG, "SSD1315 初始化失败，将无法显示");
     }
 
-    /* IMU 优化流水线：采样率与 IMU_PERIOD_MS 对齐（100Hz）。
-     * 截止频率略低于硬件 DLPF（20/21Hz），warmup 100 帧约 1s 直通，
+    /* IMU 优化流水线：采样率与 IMU_PERIOD_MS 对齐（200Hz）。
+     * 截止频率 25Hz（略高于硬件 DLPF，留出相位裕度），warmup 200 帧约 1s 直通，
      * 姿态增益沿用 STM32 方案 kp=1.0 / ki=0.0005。 */
     imu_pipeline_init_defaults(&s_imu_pipe, IMU_SAMPLE_HZ);
     ESP_LOGI(TAG, "IMU 优化链就绪: %.0fHz, accLPF=%.0fHz, gyroLPF=%.0fHz, warmup=%u",

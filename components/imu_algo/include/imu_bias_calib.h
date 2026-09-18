@@ -16,10 +16,11 @@ typedef struct {
 
     float calib_acc_sum[3];
     float calib_gyro_sum[3];
-    uint16_t calib_sample_cnt;
+    uint16_t calib_delay_cnt;   /* 上电等待计数（约 2s @200Hz，期间不校准） */
+    uint16_t calib_sample_cnt;  /* 校准采样计数（约 2s @200Hz） */
 
     mpu9250_sample_t prev_input;
-    uint8_t calib_phase;     /* 0: 校准中, 1: 完成并进入跟踪 */
+    uint8_t calib_phase;     /* 0: 等待/校准中, 1: 完成并进入跟踪 */
 } imu_bias_calib_t;
 
 void imu_bias_calib_init(imu_bias_calib_t *state);

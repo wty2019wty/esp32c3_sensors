@@ -14,11 +14,13 @@
 #include "imu_filter.h"
 #include "mpu9250.h"
 
-/* 默认参数（可按应用覆盖） */
-#define IMU_ALGO_DEFAULT_SAMPLE_HZ      100.0f
-#define IMU_ALGO_DEFAULT_ACC_CUTOFF_HZ  20.0f
-#define IMU_ALGO_DEFAULT_GYRO_CUTOFF_HZ 20.0f
-#define IMU_ALGO_DEFAULT_WARMUP_FRAMES  100u    /* 100Hz 下约 1s 直通 */
+/* 默认参数：按 200Hz 采样设计（与 IMU_PERIOD_MS=5 对齐）
+ * 截止频率略高于 100Hz 方案，仍落在硬件 DLPF（陀螺 20Hz / 加速度 21Hz）附近；
+ * warmup 200 帧 ≈ 1s 直通；校准 200 帧 ≈ 1s（见 imu_bias_calib.c）。 */
+#define IMU_ALGO_DEFAULT_SAMPLE_HZ      200.0f
+#define IMU_ALGO_DEFAULT_ACC_CUTOFF_HZ  25.0f
+#define IMU_ALGO_DEFAULT_GYRO_CUTOFF_HZ 25.0f
+#define IMU_ALGO_DEFAULT_WARMUP_FRAMES  200u
 #define IMU_ALGO_DEFAULT_ATT_KP         1.0f
 #define IMU_ALGO_DEFAULT_ATT_KI         0.0005f
 

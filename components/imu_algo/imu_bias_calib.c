@@ -2,8 +2,12 @@
 
 #include <string.h>
 
-/* 与 STM32 方案一致：启动 200 帧校准；静止阈值 0.5 °/s；跟踪 α=0.002 */
-#define CALIB_SAMPLE_NUM        200
+/* 时序按 200Hz（IMU_PERIOD_MS=5）配置：
+ *   上电 delay 400 帧 ≈ 2s：滤波 warmup / 模块稳定，期间不累计零偏
+ *   然后 calib 400 帧 ≈ 2s：静止校准
+ *   之后进入在线跟踪 */
+#define CALIB_DELAY_SAMPLE_NUM  400
+#define CALIB_SAMPLE_NUM        400
 #define GYRO_TRACK_THRES_DPS    0.5f
 #define GYRO_TRACK_THRES_SQ     (GYRO_TRACK_THRES_DPS * GYRO_TRACK_THRES_DPS)
 #define TRACK_ALPHA             0.002f
@@ -30,36 +34,42 @@ void imu_bias_calib_update(imu_bias_calib_t *state,
     }
 
     if (state->calib_phase == 0) {
-        state->calib_acc_sum[0] += input->acc_x;
-        state->calib_acc_sum[1] += input->acc_y;
-        state->calib_acc_sum[2] += input->acc_z;
-        state->calib_gyro_sum[0] += input->gyro_x;
-        state->calib_gyro_sum[1] += input->gyro_y;
-        state->calib_gyro_sum[2] += input->gyro_z;
-        state->calib_sample_cnt++;
+        if (state->calib_delay_cnt < CALIB_DELAY_SAMPLE_NUM) {
+            /* ---------- 上电等待：不校准，偏置保持 0 ---------- */
+            state->calib_delay_cnt++;
+        } else {
+            /* ---------- 静止零偏校准 ---------- */
+            state->calib_acc_sum[0] += input->acc_x;
+            state->calib_acc_sum[1] += input->acc_y;
+            state->calib_acc_sum[2] += input->acc_z;
+            state->calib_gyro_sum[0] += input->gyro_x;
+            state->calib_gyro_sum[1] += input->gyro_y;
+            state->calib_gyro_sum[2] += input->gyro_z;
+            state->calib_sample_cnt++;
 
-        if (state->calib_sample_cnt >= CALIB_SAMPLE_NUM) {
-            const float inv_n = 1.0f / (float)CALIB_SAMPLE_NUM;
+            if (state->calib_sample_cnt >= CALIB_SAMPLE_NUM) {
+                const float inv_n = 1.0f / (float)CALIB_SAMPLE_NUM;
 
-            /* 静止且 Z 轴朝上时，加速度 Z 扣除 1g 重力 */
-            state->accel_bias[0] = state->calib_acc_sum[0] * inv_n;
-            state->accel_bias[1] = state->calib_acc_sum[1] * inv_n;
-            state->accel_bias[2] = state->calib_acc_sum[2] * inv_n - 1.0f;
+                /* 静止且 Z 轴朝上时，加速度 Z 扣除 1g 重力 */
+                state->accel_bias[0] = state->calib_acc_sum[0] * inv_n;
+                state->accel_bias[1] = state->calib_acc_sum[1] * inv_n;
+                state->accel_bias[2] = state->calib_acc_sum[2] * inv_n - 1.0f;
 
-            state->gyro_bias[0] = state->calib_gyro_sum[0] * inv_n;
-            state->gyro_bias[1] = state->calib_gyro_sum[1] * inv_n;
-            state->gyro_bias[2] = state->calib_gyro_sum[2] * inv_n;
+                state->gyro_bias[0] = state->calib_gyro_sum[0] * inv_n;
+                state->gyro_bias[1] = state->calib_gyro_sum[1] * inv_n;
+                state->gyro_bias[2] = state->calib_gyro_sum[2] * inv_n;
 
-            state->prev_input = *input;
-            state->calib_phase = 1;
+                state->prev_input = *input;
+                state->calib_phase = 1;
+            }
         }
     } else {
+        /* ---------- 陀螺仪零偏在线跟踪 ---------- */
         const float dx = input->gyro_x - state->prev_input.gyro_x;
         const float dy = input->gyro_y - state->prev_input.gyro_y;
         const float dz = input->gyro_z - state->prev_input.gyro_z;
         const float delta_sq = dx * dx + dy * dy + dz * dz;
 
-        /* 帧间角速度变化很小时视为近似静止，低通跟踪零偏 */
         if (delta_sq < GYRO_TRACK_THRES_SQ) {
             state->gyro_bias[0] += TRACK_ALPHA * (input->gyro_x - state->gyro_bias[0]);
             state->gyro_bias[1] += TRACK_ALPHA * (input->gyro_y - state->gyro_bias[1]);
