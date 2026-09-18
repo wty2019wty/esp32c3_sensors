@@ -24,6 +24,7 @@
 
 #include "bmp280.h"
 #include "i2c_config.h"
+#include "imu_algo.h"
 #include "mpu9250.h"
 #include "sht40.h"
 #include "ssd1315.h"
@@ -72,11 +73,16 @@ typedef struct {
     int32_t t_fine;         /* BMP280 内部中间变量 */
     bool  bmp280_valid;
 
-    /* MPU9250：驱动换算后的物理量，无软件滤波/零偏/融合 */
+    /* MPU9250：经 imu_algo 优化链后的物理量（滤波 + 零偏补偿） */
     float acc_x, acc_y, acc_z;      /* g */
     float gyro_x, gyro_y, gyro_z;   /* °/s */
     float mag_x, mag_y, mag_z;      /* μT */
     bool  mpu9250_valid;
+
+    /* 姿态角（Mahony 六轴，标准 ZYX，单位 °） */
+    float roll_deg, pitch_deg, yaw_deg;
+    bool  imu_calib_done;           /* 零偏启动校准是否完成 */
+    bool  imu_att_valid;            /* 姿态角是否可用 */
 
     /* 系统 */
     uint32_t uptime_sec;
@@ -90,6 +96,7 @@ static sht40_t s_sht;
 static bmp280_t s_bmp;
 static mpu9250_t s_mpu;
 static ssd1315_t s_oled;
+static imu_pipeline_t s_imu_pipe;
 
 static sensor_data_t s_data;
 static SemaphoreHandle_t s_data_mutex;
@@ -261,14 +268,14 @@ static void display_render(const sensor_data_t *d)
     snprintf(line, sizeof(line), "ALT %sm I2C:%s", a, i2c);
     ssd1315_draw_string(&s_oled, 2, 0, line);
 
-    /* Line 3: 加速度计（A，单位 g，驱动换算原始值） */
+    /* Line 3: 加速度计（A，g，滤波+零偏补偿后） */
     fmt_field(a, sizeof(a), d->mpu9250_valid, d->acc_x, 6);
     fmt_field(b, sizeof(b), d->mpu9250_valid, d->acc_y, 6);
     fmt_field(c, sizeof(c), d->mpu9250_valid, d->acc_z, 6);
     snprintf(line, sizeof(line), "A%s %s %s", a, b, c);
     ssd1315_draw_string(&s_oled, 3, 0, line);
 
-    /* Line 4: 陀螺仪（G，单位 °/s，驱动换算原始值，无滤波/零偏补偿） */
+    /* Line 4: 陀螺仪（G，°/s，滤波+零偏补偿后） */
     fmt_field(a, sizeof(a), d->mpu9250_valid, d->gyro_x, 6);
     fmt_field(b, sizeof(b), d->mpu9250_valid, d->gyro_y, 6);
     fmt_field(c, sizeof(c), d->mpu9250_valid, d->gyro_z, 6);
@@ -284,8 +291,16 @@ static void display_render(const sensor_data_t *d)
     snprintf(line, sizeof(line), "M%s %s %s", a, b, c);
     ssd1315_draw_string(&s_oled, 5, 0, line);
 
-    /* Line 6: 姿态角占位（优化算法已移除，待重构） */
-    snprintf(line, sizeof(line), "R---P---Y---");
+    /* Line 6: 姿态角 R/P/Y（Mahony 六轴，2 位小数；未就绪时 ---） */
+    bool att_valid = d->imu_att_valid;
+    if (att_valid) {
+        fmt_field(a, sizeof(a), true, d->roll_deg, 6);
+        fmt_field(b, sizeof(b), true, d->pitch_deg, 6);
+        fmt_field(c, sizeof(c), true, d->yaw_deg, 6);
+        snprintf(line, sizeof(line), "R%s %s %s", a, b, c);
+    } else {
+        snprintf(line, sizeof(line), "R---P---Y---");
+    }
     ssd1315_draw_string(&s_oled, 6, 0, line);
 
     /* Line 7: 运行时间 + 空闲堆 */
@@ -305,21 +320,26 @@ static void display_render(const sensor_data_t *d)
 /* ---------------- 任务 ---------------- */
 
 /**
- * @brief IMU 任务：100Hz 读取 MPU9250，直接显示驱动换算后的原始物理量
+ * @brief IMU 任务：100Hz 读取 MPU9250，走 imu_algo 优化链后写入共享数据
  *
- * 软件优化流水线（imu_filter / imu_bias_calib / mahony）已全部移除，
- * 为后续重构算法提供干净基线。硬件 DLPF（陀螺 20Hz / 加速度 21Hz）
- * 仍保留在驱动初始化中，仅作芯片侧噪声配置，不做软件后处理。
+ * 数据链（移植自 stm32f103 Task_pm6500_Read）：
+ *   驱动突发读 → 二阶低通滤波 → 零偏校准/跟踪 → Mahony 六轴姿态
+ *
+ * 硬件 DLPF（陀螺 20Hz / 加速度 21Hz）仍在驱动中配置，与软件低通叠加。
+ * 校准完成前姿态角也会输出，但零偏尚未收敛，显示与日志会标记 calib 状态。
  */
 static void imu_task(void *arg)
 {
     (void)arg;
 
     TickType_t last_wake = xTaskGetTickCount();
+    bool calib_announced = false;
 
     while (1) {
         mpu9250_sample_t raw;
+        mpu9250_sample_t out;
         memset(&raw, 0, sizeof(raw));
+        memset(&out, 0, sizeof(out));
 
         xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
         bool mpu_ok = (mpu9250_read(&s_mpu, &raw) == ESP_OK);
@@ -328,17 +348,42 @@ static void imu_task(void *arg)
         }
         xSemaphoreGive(s_i2c_mutex);
 
-        xSemaphoreTake(s_data_mutex, portMAX_DELAY);
+        bool pipe_ok = false;
         if (mpu_ok) {
-            s_data.acc_x = raw.acc_x;
-            s_data.acc_y = raw.acc_y;
-            s_data.acc_z = raw.acc_z;
-            s_data.gyro_x = raw.gyro_x;
-            s_data.gyro_y = raw.gyro_y;
-            s_data.gyro_z = raw.gyro_z;
-            s_data.mag_x = raw.mag_x;
-            s_data.mag_y = raw.mag_y;
-            s_data.mag_z = raw.mag_z;
+            pipe_ok = imu_pipeline_process(&s_imu_pipe, &raw, &out);
+        }
+
+        const bool calib_done = imu_pipeline_calib_done(&s_imu_pipe);
+        if (calib_done && !calib_announced) {
+            ESP_LOGI(TAG,
+                     "IMU 零偏校准完成: gyro[%.3f %.3f %.3f]dps accel[%.3f %.3f %.3f]g",
+                     (double)s_imu_pipe.bias.gyro_bias[0],
+                     (double)s_imu_pipe.bias.gyro_bias[1],
+                     (double)s_imu_pipe.bias.gyro_bias[2],
+                     (double)s_imu_pipe.bias.accel_bias[0],
+                     (double)s_imu_pipe.bias.accel_bias[1],
+                     (double)s_imu_pipe.bias.accel_bias[2]);
+            calib_announced = true;
+        }
+
+        xSemaphoreTake(s_data_mutex, portMAX_DELAY);
+        if (pipe_ok) {
+            s_data.acc_x = out.acc_x;
+            s_data.acc_y = out.acc_y;
+            s_data.acc_z = out.acc_z;
+            s_data.gyro_x = out.gyro_x;
+            s_data.gyro_y = out.gyro_y;
+            s_data.gyro_z = out.gyro_z;
+            s_data.mag_x = out.mag_x;
+            s_data.mag_y = out.mag_y;
+            s_data.mag_z = out.mag_z;
+            s_data.roll_deg = s_imu_pipe.attitude.roll_deg;
+            s_data.pitch_deg = s_imu_pipe.attitude.pitch_deg;
+            s_data.yaw_deg = s_imu_pipe.attitude.yaw_deg;
+            s_data.imu_calib_done = calib_done;
+            s_data.imu_att_valid = true;
+        } else {
+            s_data.imu_att_valid = false;
         }
         s_data.mpu9250_valid = mpu_ok;
         xSemaphoreGive(s_data_mutex);
@@ -501,6 +546,16 @@ void app_main(void)
     if (ssd1315_init(&s_oled, s_bus, I2C_SCL_SPEED_HZ) != ESP_OK) {
         ESP_LOGE(TAG, "SSD1315 初始化失败，将无法显示");
     }
+
+    /* IMU 优化流水线：采样率与 IMU_PERIOD_MS 对齐（100Hz）。
+     * 截止频率略低于硬件 DLPF（20/21Hz），warmup 100 帧约 1s 直通，
+     * 姿态增益沿用 STM32 方案 kp=1.0 / ki=0.0005。 */
+    imu_pipeline_init_defaults(&s_imu_pipe, IMU_SAMPLE_HZ);
+    ESP_LOGI(TAG, "IMU 优化链就绪: %.0fHz, accLPF=%.0fHz, gyroLPF=%.0fHz, warmup=%u",
+             (double)IMU_SAMPLE_HZ,
+             (double)IMU_ALGO_DEFAULT_ACC_CUTOFF_HZ,
+             (double)IMU_ALGO_DEFAULT_GYRO_CUTOFF_HZ,
+             (unsigned)IMU_ALGO_DEFAULT_WARMUP_FRAMES);
 
     /* 3. 创建任务 */
     BaseType_t ok;
