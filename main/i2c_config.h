@@ -3,7 +3,8 @@
  *
  * 注意：ESP-IDF v6.1 新版 i2c_master 驱动的时钟是在
  * i2c_device_config_t.scl_speed_hz 中按设备设置的，总线配置结构体里没有时钟字段。
- * 因此所有驱动必须引用本文件的宏，才能统一改速。
+ * 本文件位于 main/；app_main 初始化各驱动时传入 I2C_SCL_SPEED_HZ。
+ * 引脚宏仅用于 main 中的总线初始化与线电平自检。
  */
 #pragma once
 

@@ -9,7 +9,6 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "i2c_config.h"
 
 static const char *TAG = "bmp280";
 
@@ -55,9 +54,9 @@ void bmp280_compensate_temperature(const bmp280_t *bmp, int32_t adc_t, float *te
     *temp_c = (float)((var1 + var2) / 5120.0);
 }
 
-esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus)
+esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus, uint32_t scl_speed_hz)
 {
-    if (bmp == NULL || bus == NULL) {
+    if (bmp == NULL || bus == NULL || scl_speed_hz == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -73,7 +72,7 @@ esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus)
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = BMP280_I2C_ADDR,
-        .scl_speed_hz = I2C_SCL_SPEED_HZ,
+        .scl_speed_hz = scl_speed_hz,
     };
     err = i2c_master_bus_add_device(bus, &dev_cfg, &bmp->dev);
     if (err != ESP_OK) {

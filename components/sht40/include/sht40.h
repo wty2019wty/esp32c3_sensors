@@ -44,9 +44,10 @@ typedef struct {
  *
  * @param[out] sht 设备句柄
  * @param[in]  bus I2C 主总线句柄
+ * @param[in]  scl_speed_hz 设备 SCL 频率（由应用从 i2c_config.h 传入）
  * @return ESP_OK 成功；其它为错误码（设备缺失时 present 置 false）
  */
-esp_err_t sht40_init(sht40_t *sht, i2c_master_bus_handle_t bus);
+esp_err_t sht40_init(sht40_t *sht, i2c_master_bus_handle_t bus, uint32_t scl_speed_hz);
 
 /**
  * @brief 触发一次高精度测量并读取温湿度

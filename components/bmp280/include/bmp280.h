@@ -71,9 +71,10 @@ typedef struct {
  *
  * @param[out] bmp 设备句柄
  * @param[in]  bus I2C 主总线句柄
+ * @param[in]  scl_speed_hz 设备 SCL 频率（由应用从 i2c_config.h 传入）
  * @return ESP_OK 成功；其它为错误码
  */
-esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus);
+esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus, uint32_t scl_speed_hz);
 
 /**
  * @brief 读取温度、气压与海拔

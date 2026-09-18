@@ -4,7 +4,6 @@
 #include "sht40.h"
 
 #include "esp_log.h"
-#include "i2c_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -26,9 +25,9 @@ uint8_t sht40_crc8(const uint8_t *data, size_t len)
     return crc;
 }
 
-esp_err_t sht40_init(sht40_t *sht, i2c_master_bus_handle_t bus)
+esp_err_t sht40_init(sht40_t *sht, i2c_master_bus_handle_t bus, uint32_t scl_speed_hz)
 {
-    if (sht == NULL || bus == NULL) {
+    if (sht == NULL || bus == NULL || scl_speed_hz == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -45,7 +44,7 @@ esp_err_t sht40_init(sht40_t *sht, i2c_master_bus_handle_t bus)
         i2c_device_config_t dev_cfg = {
             .dev_addr_length = I2C_ADDR_BIT_LEN_7,
             .device_address = addrs[i],
-            .scl_speed_hz = I2C_SCL_SPEED_HZ,
+            .scl_speed_hz = scl_speed_hz,
         };
         esp_err_t err = i2c_master_bus_add_device(bus, &dev_cfg, &sht->dev);
         if (err != ESP_OK) {

@@ -24,23 +24,49 @@ I2C 地址：
 
 ## 2. 目录结构
 
+采用 ESP-IDF 多组件布局：板级 I2C 配置放在 `main/`，驱动与算法拆到 `components/`。
+
 ```
 esp32c3_sensors/
 ├── CMakeLists.txt
 ├── sdkconfig.defaults
-└── main/
-    ├── CMakeLists.txt
-    ├── idf_component.yml
-    ├── main.c              # I2C 初始化、设备扫描、FreeRTOS 任务、显示布局
-    ├── sht40.c / sht40.h   # SHT40 温湿度（CRC-8 校验）
-    ├── bmp280.c / bmp280.h # BMP280 温度/气压/海拔（t_fine 耦合）
-    ├── mpu9250.c / mpu9250.h # MPU6500/9250 加速度/陀螺仪 + AK8963 磁力计（Fuse ROM 校正 + DRDY）
-    ├── ssd1315.c / ssd1315.h # OLED 驱动（1024 字节帧缓冲 + 6×8 字体）
-    ├── imu_filter.c / imu_filter.h # [未编译] IMU 二阶低通滤波（待重构）
-    ├── imu_bias_calib.c / imu_bias_calib.h # [未编译] 陀螺零偏校准（待重构）
-    ├── mahony.c / mahony.h # [未编译] Mahony 姿态融合（待重构）
-    └── font_6x8.h          # 6×8 ASCII 点阵字体（96 字形）
+├── main/
+│   ├── CMakeLists.txt      # REQUIRES 各业务组件；imu_algo 刻意未链接
+│   ├── idf_component.yml
+│   ├── main.c              # I2C 总线初始化、设备扫描、FreeRTOS 任务、显示布局
+│   └── i2c_config.h        # 板级 I2C 配置（引脚 / 速率 / 超时）
+└── components/
+    ├── sht40/              # SHT40 温湿度（CRC-8 校验）
+    │   ├── include/sht40.h
+    │   └── sht40.c
+    ├── bmp280/             # BMP280 温度/气压/海拔（t_fine 耦合）
+    │   ├── include/bmp280.h
+    │   └── bmp280.c
+    ├── mpu9250/            # MPU6500/9250 + AK8963（Fuse ROM 校正 + DRDY）
+    │   ├── include/mpu9250.h
+    │   └── mpu9250.c
+    ├── ssd1315/            # OLED 驱动（1024 字节帧缓冲 + 6×8 字体）
+    │   ├── include/ssd1315.h
+    │   ├── ssd1315.c
+    │   └── font_6x8.h     # 私有：6×8 ASCII 点阵字体（96 字形）
+    └── imu_algo/           # [未链入固件] IMU 算法，待重构后接入
+        ├── include/
+        │   ├── imu_filter.h
+        │   ├── imu_bias_calib.h
+        │   └── mahony.h
+        ├── imu_filter.c    # 二阶低通滤波
+        ├── imu_bias_calib.c
+        └── mahony.c        # Mahony 姿态融合
 ```
+
+组件依赖关系：
+
+| 组件 | 依赖 | 说明 |
+| --- | --- | --- |
+| `main` | 传感器/OLED 组件 | 持有 `i2c_config.h`；init 时把 `I2C_SCL_SPEED_HZ` 传给各驱动 |
+| `sht40` / `bmp280` / `mpu9250` | `esp_driver_i2c` | 传感器驱动，不依赖应用配置头 |
+| `ssd1315` | `esp_driver_i2c` | OLED；`font_6x8.h` 为私有头 |
+| `imu_algo` | `mpu9250` | 当前未被 `main` REQUIRES，符号不会链入固件 |
 
 ## 3. 构建与烧录
 
@@ -140,8 +166,9 @@ Up:00:05:23 Heap:123K
      个别批次的 SSD1315 需要将对比度（0x81）或预充电（0xD9）微调。
 
 9. **IMU 数据路径（当前为原始数据基线）**
-   - **软件优化算法已全部移除**：`imu_filter` / `imu_bias_calib` / `mahony` 仍在源码目录
-     中保留，但**不再编译进固件**，供后续重构时对照或重写。
+   - **软件优化算法已全部移除**：`imu_filter` / `imu_bias_calib` / `mahony` 保留在
+     `components/imu_algo/`，但 `main` 未 REQUIRES 该组件，**符号不会链入固件**，
+     供后续重构时对照或重写。接入时在 `main/CMakeLists.txt` 的 REQUIRES 追加 `imu_algo`。
    - 当前 IMU 路径：**硬件 DLPF → 突发读 → LSB 换算物理量 → 直接显示**。
    - `mpu9250`：
      - 陀螺硬件 DLPF 20Hz、加速度 DLPF 21Hz（芯片侧配置，非软件算法）。
@@ -175,5 +202,6 @@ Up:00:05:23 Heap:123K
 
 3. **I2C 时钟是“按设备”设置的**
    - ESP-IDF v6.1 新版驱动的时钟在 `i2c_device_config_t.scl_speed_hz`，总线配置结构体
-     没有时钟字段；因此统一改速必须改 `main/i2c_config.h` 的 `I2C_SCL_SPEED_HZ`。
+     没有时钟字段；因此统一改速必须改 `main/i2c_config.h` 的 `I2C_SCL_SPEED_HZ`
+     （`app_main` 会把该值传入各驱动 init）。
 

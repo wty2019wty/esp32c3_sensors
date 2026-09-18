@@ -11,7 +11,6 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "i2c_config.h"
 
 static const char *TAG = "mpu9250";
 
@@ -43,7 +42,7 @@ static esp_err_t mag_write_reg(mpu9250_t *mpu, uint8_t reg, uint8_t val)
 
 /* ---------- 初始化 ---------- */
 
-static esp_err_t mpu9250_init_mag(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
+static esp_err_t mpu9250_init_mag(mpu9250_t *mpu, i2c_master_bus_handle_t bus, uint32_t scl_speed_hz)
 {
     mpu->mag_dev = NULL;
     mpu->mag_present = false;
@@ -57,7 +56,7 @@ static esp_err_t mpu9250_init_mag(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = AK8963_I2C_ADDR,
-        .scl_speed_hz = I2C_SCL_SPEED_HZ,
+        .scl_speed_hz = scl_speed_hz,
     };
     err = i2c_master_bus_add_device(bus, &dev_cfg, &mpu->mag_dev);
     if (err != ESP_OK) {
@@ -129,9 +128,9 @@ static esp_err_t mpu9250_init_mag(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
     return ESP_OK;
 }
 
-esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
+esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus, uint32_t scl_speed_hz)
 {
-    if (mpu == NULL || bus == NULL) {
+    if (mpu == NULL || bus == NULL || scl_speed_hz == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -150,7 +149,7 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
         i2c_device_config_t dev_cfg = {
             .dev_addr_length = I2C_ADDR_BIT_LEN_7,
             .device_address = addrs[i],
-            .scl_speed_hz = I2C_SCL_SPEED_HZ,
+            .scl_speed_hz = scl_speed_hz,
         };
         err = i2c_master_bus_add_device(bus, &dev_cfg, &mpu->dev);
         if (err == ESP_OK) {
@@ -240,7 +239,7 @@ esp_err_t mpu9250_init(mpu9250_t *mpu, i2c_master_bus_handle_t bus)
 
     /* 磁力计为可选，失败不影响 IMU 主体；MPU6500 无磁力计直接跳过 */
     if (has_mag) {
-        (void)mpu9250_init_mag(mpu, bus);
+        (void)mpu9250_init_mag(mpu, bus, scl_speed_hz);
     } else {
         /* 诊断：旁路后探测常见磁力计地址（AK8963/QMC5883L/HMC5883L），
          * 用于判断山寨板是否外挂了独立磁力计。 */

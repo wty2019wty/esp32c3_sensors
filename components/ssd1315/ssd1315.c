@@ -13,7 +13,6 @@
 
 #include "esp_log.h"
 #include "font_6x8.h"
-#include "i2c_config.h"
 
 static const char *TAG = "ssd1315";
 
@@ -62,9 +61,9 @@ static esp_err_t ssd1315_send_data(ssd1315_t *oled, const uint8_t *data, size_t 
     return ret;
 }
 
-esp_err_t ssd1315_init(ssd1315_t *oled, i2c_master_bus_handle_t bus)
+esp_err_t ssd1315_init(ssd1315_t *oled, i2c_master_bus_handle_t bus, uint32_t scl_speed_hz)
 {
-    if (oled == NULL || bus == NULL) {
+    if (oled == NULL || bus == NULL || scl_speed_hz == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -85,7 +84,7 @@ esp_err_t ssd1315_init(ssd1315_t *oled, i2c_master_bus_handle_t bus)
         i2c_device_config_t dev_cfg = {
             .dev_addr_length = I2C_ADDR_BIT_LEN_7,
             .device_address = addrs[i],
-            .scl_speed_hz = I2C_SCL_SPEED_HZ,
+            .scl_speed_hz = scl_speed_hz,
         };
         err = i2c_master_bus_add_device(bus, &dev_cfg, &oled->dev);
         if (err == ESP_OK) {

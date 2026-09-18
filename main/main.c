@@ -426,7 +426,7 @@ static void display_task(void *arg)
  */
 static void oled_self_test(void)
 {
-    if (ssd1315_init(&s_oled, s_bus) != ESP_OK) {
+    if (ssd1315_init(&s_oled, s_bus, I2C_SCL_SPEED_HZ) != ESP_OK) {
         ESP_LOGE(TAG, "OLED 自检初始化失败");
         return;
     }
@@ -489,16 +489,16 @@ void app_main(void)
     i2c_scan();
 
     /* 2. 初始化各传感器（失败不阻塞，对应显示行显示 ---） */
-    if (sht40_init(&s_sht, s_bus) != ESP_OK) {
+    if (sht40_init(&s_sht, s_bus, I2C_SCL_SPEED_HZ) != ESP_OK) {
         ESP_LOGE(TAG, "SHT40 初始化失败，相关显示将标记为 ---");
     }
-    if (bmp280_init(&s_bmp, s_bus) != ESP_OK) {
+    if (bmp280_init(&s_bmp, s_bus, I2C_SCL_SPEED_HZ) != ESP_OK) {
         ESP_LOGE(TAG, "BMP280 初始化失败，相关显示将标记为 ---");
     }
-    if (mpu9250_init(&s_mpu, s_bus) != ESP_OK) {
+    if (mpu9250_init(&s_mpu, s_bus, I2C_SCL_SPEED_HZ) != ESP_OK) {
         ESP_LOGE(TAG, "MPU9250 初始化失败，相关显示将标记为 ---");
     }
-    if (ssd1315_init(&s_oled, s_bus) != ESP_OK) {
+    if (ssd1315_init(&s_oled, s_bus, I2C_SCL_SPEED_HZ) != ESP_OK) {
         ESP_LOGE(TAG, "SSD1315 初始化失败，将无法显示");
     }
 
