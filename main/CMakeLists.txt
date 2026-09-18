@@ -5,9 +5,6 @@ idf_component_register(
         "bmp280.c"
         "mpu9250.c"
         "ssd1315.c"
-        "mahony.c"
-        "imu_filter.c"
-        "imu_bias_calib.c"
     INCLUDE_DIRS
         "."
     REQUIRES

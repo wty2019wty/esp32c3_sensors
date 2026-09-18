@@ -24,9 +24,6 @@
 
 #include "bmp280.h"
 #include "i2c_config.h"
-#include "imu_bias_calib.h"
-#include "imu_filter.h"
-#include "mahony.h"
 #include "mpu9250.h"
 #include "sht40.h"
 #include "ssd1315.h"
@@ -52,19 +49,7 @@ static const char *TAG = "main";
 #define I2C_ADDR_MPU9250        0x68
 #define I2C_ADDR_BMP280         0x76
 
-#define MAHONY_KP               0.8f
-#define MAHONY_KP_STILL         1.0f            /* 静止时更信加速度，加速 Roll/Pitch 收敛 */
-#define MAHONY_KI               0.0005f
-#define MAHONY_KI_STILL         0.005f          /* 静止时提高 Ki，加速残余零偏收敛 */
-/* ZUPT：静止且补偿后残差角速度低于该值时，融合输入置零，避免噪声积分成 Yaw 漂移 */
-#define IMU_ZUPT_RESID_DPS      0.20f
-#define IMU_ZUPT_RESID_SQ       (IMU_ZUPT_RESID_DPS * IMU_ZUPT_RESID_DPS)
-
-/* IMU 前端滤波与零偏校准（移植自 stm32f103 提高陀螺仪精度的方案） */
-#define IMU_SAMPLE_HZ           (1000.0f / IMU_PERIOD_MS)  /* 100Hz */
-/* 硬件 DLPF 已把陀螺压到 20Hz、加速度 21Hz，软件再低通一档细滤 */
-#define IMU_ACCEL_CUTOFF_HZ     20.0f           /* 加速度二阶低通截止频率 */
-#define IMU_GYRO_CUTOFF_HZ      16.0f           /* 陀螺仪二阶低通截止频率 */
+#define IMU_SAMPLE_HZ           (1000.0f / IMU_PERIOD_MS)  /* 100Hz，仅用于日志 */
 
 #define DISPLAY_COLS            21
 #define DISPLAY_ROWS            8
@@ -87,13 +72,11 @@ typedef struct {
     int32_t t_fine;         /* BMP280 内部中间变量 */
     bool  bmp280_valid;
 
-    /* MPU9250 */
+    /* MPU9250：驱动换算后的物理量，无软件滤波/零偏/融合 */
     float acc_x, acc_y, acc_z;      /* g */
     float gyro_x, gyro_y, gyro_z;   /* °/s */
     float mag_x, mag_y, mag_z;      /* μT */
-    float roll, pitch, yaw;         /* ° */
     bool  mpu9250_valid;
-    bool  imu_calibrated;           /* 陀螺零偏校准是否完成 */
 
     /* 系统 */
     uint32_t uptime_sec;
@@ -273,30 +256,26 @@ static void display_render(const sensor_data_t *d)
     snprintf(line, sizeof(line), "BMP %s %shPa", a, b);
     ssd1315_draw_string(&s_oled, 1, 0, line);
 
-    /* Line 2: BMP280 海拔 + I2C 状态（校准期间显示 CAL） */
+    /* Line 2: BMP280 海拔 + I2C 状态 */
     fmt_field(a, sizeof(a), d->bmp280_valid, d->bmp280_alt, 7);
-    if (d->mpu9250_valid && !d->imu_calibrated) {
-        snprintf(line, sizeof(line), "ALT %sm CAL", a);
-    } else {
-        snprintf(line, sizeof(line), "ALT %sm I2C:%s", a, i2c);
-    }
+    snprintf(line, sizeof(line), "ALT %sm I2C:%s", a, i2c);
     ssd1315_draw_string(&s_oled, 2, 0, line);
 
-    /* Line 3: 加速度计（A，单位 g，固定宽度） */
+    /* Line 3: 加速度计（A，单位 g，驱动换算原始值） */
     fmt_field(a, sizeof(a), d->mpu9250_valid, d->acc_x, 6);
     fmt_field(b, sizeof(b), d->mpu9250_valid, d->acc_y, 6);
     fmt_field(c, sizeof(c), d->mpu9250_valid, d->acc_z, 6);
     snprintf(line, sizeof(line), "A%s %s %s", a, b, c);
     ssd1315_draw_string(&s_oled, 3, 0, line);
 
-    /* Line 4: 陀螺仪（G，单位 °/s，已零偏补偿，固定宽度） */
+    /* Line 4: 陀螺仪（G，单位 °/s，驱动换算原始值，无滤波/零偏补偿） */
     fmt_field(a, sizeof(a), d->mpu9250_valid, d->gyro_x, 6);
     fmt_field(b, sizeof(b), d->mpu9250_valid, d->gyro_y, 6);
     fmt_field(c, sizeof(c), d->mpu9250_valid, d->gyro_z, 6);
     snprintf(line, sizeof(line), "G%s %s %s", a, b, c);
     ssd1315_draw_string(&s_oled, 4, 0, line);
 
-    /* Line 5: 磁力计（M，单位 μT，固定宽度）；无磁力计时显示 --- */
+    /* Line 5: 磁力计（M，单位 μT）；无磁力计时显示 --- */
     bool mag_valid = d->mpu9250_valid &&
                      !(d->mag_x == 0.0f && d->mag_y == 0.0f && d->mag_z == 0.0f);
     fmt_field(a, sizeof(a), mag_valid, d->mag_x, 6);
@@ -305,12 +284,8 @@ static void display_render(const sensor_data_t *d)
     snprintf(line, sizeof(line), "M%s %s %s", a, b, c);
     ssd1315_draw_string(&s_oled, 5, 0, line);
 
-    /* Line 6: Mahony 姿态角（R/P/Y，单位 °，固定宽度） */
-    bool att_valid = d->mpu9250_valid && d->imu_calibrated;
-    fmt_field(a, sizeof(a), att_valid, d->roll, 6);
-    fmt_field(b, sizeof(b), att_valid, d->pitch, 6);
-    fmt_field(c, sizeof(c), att_valid, d->yaw, 6);
-    snprintf(line, sizeof(line), "R%sP%sY%s", a, b, c);
+    /* Line 6: 姿态角占位（优化算法已移除，待重构） */
+    snprintf(line, sizeof(line), "R---P---Y---");
     ssd1315_draw_string(&s_oled, 6, 0, line);
 
     /* Line 7: 运行时间 + 空闲堆 */
@@ -330,32 +305,17 @@ static void display_render(const sensor_data_t *d)
 /* ---------------- 任务 ---------------- */
 
 /**
- * @brief IMU 任务：100Hz 读取 MPU9250，经 二阶低通滤波 -> 零偏校准/跟踪 -> Mahony 融合
+ * @brief IMU 任务：100Hz 读取 MPU9250，直接显示驱动换算后的原始物理量
  *
- * 该流水线移植自 stm32f103 工程提高陀螺仪精度的方案：
- *   1) imu_filter        抑制高频噪声，稳定陀螺积分；
- *   2) imu_bias_calib    上电静止校准 + 运行期静止零偏跟踪，消除陀螺漂移；
- *   3) mahony_update     四元数姿态融合，输出 Roll/Pitch/Yaw。
+ * 软件优化流水线（imu_filter / imu_bias_calib / mahony）已全部移除，
+ * 为后续重构算法提供干净基线。硬件 DLPF（陀螺 20Hz / 加速度 21Hz）
+ * 仍保留在驱动初始化中，仅作芯片侧噪声配置，不做软件后处理。
  */
 static void imu_task(void *arg)
 {
     (void)arg;
 
-    mahony_t ahrs;
-    mahony_init(&ahrs, MAHONY_KP, MAHONY_KI);
-
-    imu_filter_t filter;
-    imu_filter_init(&filter, IMU_SAMPLE_HZ,
-                    IMU_ACCEL_CUTOFF_HZ, IMU_GYRO_CUTOFF_HZ);
-
-    imu_bias_calib_t calib;
-    imu_bias_calib_init(&calib);
-
-    /* 校准完成前不喂融合器：避免未补偿零偏先把四元数积分脏 */
-    bool fusion_armed = false;
-
     TickType_t last_wake = xTaskGetTickCount();
-    int64_t last_us = esp_timer_get_time();
 
     while (1) {
         mpu9250_sample_t raw;
@@ -368,81 +328,21 @@ static void imu_task(void *arg)
         }
         xSemaphoreGive(s_i2c_mutex);
 
-        /* 计算实际采样间隔（补偿调度抖动） */
-        int64_t now_us = esp_timer_get_time();
-        float dt = (float)(now_us - last_us) / 1000000.0f;
-        last_us = now_us;
-        if (dt <= 0.0f || dt > 0.5f) {
-            dt = (float)IMU_PERIOD_MS / 1000.0f;
-        }
-
-        mpu9250_sample_t filtered = raw;
-        mpu9250_sample_t fused_in = raw;
-
-        if (mpu_ok) {
-            imu_filter_process(&raw, &filtered, &filter);
-            imu_bias_calib_update(&calib, &filtered, &fused_in);
-
-            bool calib_done = imu_bias_calib_is_done(&calib);
-            if (calib_done && !fusion_armed) {
-                /* 零偏就绪后再从单位四元数起步，丢弃校准期的积分历史 */
-                mahony_init(&ahrs, MAHONY_KP, MAHONY_KI);
-                fusion_armed = true;
-            }
-
-            if (fusion_armed) {
-                bool still = imu_bias_calib_is_still(&calib);
-
-                /* 静止时提高 Kp/Ki；运动时压低 Kp，减少线加速度对姿态的污染 */
-                float kp = still ? MAHONY_KP_STILL : MAHONY_KP;
-                float ki = still ? MAHONY_KI_STILL : MAHONY_KI;
-                mahony_set_gains(&ahrs, kp, ki);
-
-                float gx = fused_in.gyro_x;
-                float gy = fused_in.gyro_y;
-                float gz = fused_in.gyro_z;
-
-                /* ZUPT：静止且残差很小时强制角速度为 0，抑制 Yaw 噪声积分 */
-                if (still) {
-                    float r2 = gx * gx + gy * gy + gz * gz;
-                    if (r2 < IMU_ZUPT_RESID_SQ) {
-                        gx = 0.0f;
-                        gy = 0.0f;
-                        gz = 0.0f;
-                    }
-                }
-
-                mahony_update(&ahrs,
-                              gx, gy, gz,
-                              fused_in.acc_x, fused_in.acc_y, fused_in.acc_z,
-                              fused_in.mag_x, fused_in.mag_y, fused_in.mag_z,
-                              dt);
-            }
-        }
-
-        float roll = 0.0f, pitch = 0.0f, yaw = 0.0f;
-        mahony_get_euler(&ahrs, &roll, &pitch, &yaw);
-
         xSemaphoreTake(s_data_mutex, portMAX_DELAY);
         if (mpu_ok) {
-            s_data.acc_x = fused_in.acc_x;
-            s_data.acc_y = fused_in.acc_y;
-            s_data.acc_z = fused_in.acc_z;
-            s_data.gyro_x = fused_in.gyro_x;
-            s_data.gyro_y = fused_in.gyro_y;
-            s_data.gyro_z = fused_in.gyro_z;
-            s_data.mag_x = fused_in.mag_x;
-            s_data.mag_y = fused_in.mag_y;
-            s_data.mag_z = fused_in.mag_z;
-            s_data.roll = roll;
-            s_data.pitch = pitch;
-            s_data.yaw = yaw;
+            s_data.acc_x = raw.acc_x;
+            s_data.acc_y = raw.acc_y;
+            s_data.acc_z = raw.acc_z;
+            s_data.gyro_x = raw.gyro_x;
+            s_data.gyro_y = raw.gyro_y;
+            s_data.gyro_z = raw.gyro_z;
+            s_data.mag_x = raw.mag_x;
+            s_data.mag_y = raw.mag_y;
+            s_data.mag_z = raw.mag_z;
         }
         s_data.mpu9250_valid = mpu_ok;
-        s_data.imu_calibrated = imu_bias_calib_is_done(&calib);
         xSemaphoreGive(s_data_mutex);
 
-        /* 固定相位延时：补偿本轮 I2C/计算耗时，保证 100Hz 周期稳定 */
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(IMU_PERIOD_MS));
     }
 }
