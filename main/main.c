@@ -82,6 +82,8 @@ typedef struct {
     /* 姿态角（Mahony 六轴，标准 ZYX，单位 °） */
     float roll_deg, pitch_deg, yaw_deg;
     bool  imu_calib_done;           /* 零偏启动校准是否完成 */
+    float imu_calib_progress;       /* 预热+校准进度 0~1 */
+    uint8_t imu_calib_stage;        /* 0 预热 / 1 校准 / 2 完成 */
     bool  imu_att_valid;            /* 姿态角是否可用 */
 
     /* 系统 */
@@ -291,9 +293,25 @@ static void display_render(const sensor_data_t *d)
     snprintf(line, sizeof(line), "M%s %s %s", a, b, c);
     ssd1315_draw_string(&s_oled, 5, 0, line);
 
-    /* Line 6: 姿态角 R/P/Y（Mahony 六轴，2 位小数；未就绪时 ---） */
-    bool att_valid = d->imu_att_valid;
-    if (att_valid) {
+    /* Line 6: 姿态角 R/P/Y；预热/校准中显示进度条 */
+    if (!d->imu_calib_done) {
+        int pct = (int)(d->imu_calib_progress * 100.0f + 0.5f);
+        if (pct < 0) {
+            pct = 0;
+        } else if (pct > 100) {
+            pct = 100;
+        }
+        int filled = (pct * 10) / 100;
+        char bar[11];
+        for (int i = 0; i < 10; i++) {
+            bar[i] = (i < filled) ? '#' : '-';
+        }
+        bar[10] = '\0';
+        const char *tag = (d->imu_calib_stage == IMU_BIAS_STAGE_WARMUP) ? "WARM"
+                        : (d->imu_calib_stage == IMU_BIAS_STAGE_CALIB)  ? "CAL "
+                                                                        : "IMU ";
+        snprintf(line, sizeof(line), "%s[%s]%3d%%", tag, bar, pct);
+    } else if (d->imu_att_valid) {
         fmt_field(a, sizeof(a), true, d->roll_deg, 6);
         fmt_field(b, sizeof(b), true, d->pitch_deg, 6);
         fmt_field(c, sizeof(c), true, d->yaw_deg, 6);
@@ -383,6 +401,8 @@ static void imu_task(void *arg)
             s_data.pitch_deg = s_imu_pipe.attitude.pitch_deg;
             s_data.yaw_deg = s_imu_pipe.attitude.yaw_deg;
             s_data.imu_calib_done = calib_done;
+            s_data.imu_calib_progress = imu_bias_calib_progress(&s_imu_pipe.bias);
+            s_data.imu_calib_stage = imu_bias_calib_stage(&s_imu_pipe.bias);
             s_data.imu_att_valid = true;
         } else {
             s_data.imu_att_valid = false;

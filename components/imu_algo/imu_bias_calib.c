@@ -3,14 +3,15 @@
 #include <string.h>
 
 /* 时序按 200Hz（IMU_PERIOD_MS=5）配置：
- *   上电 delay 400 帧 ≈ 2s：滤波 warmup / 模块稳定，期间不累计零偏
- *   然后 calib 400 帧 ≈ 2s：静止校准
+ *   上电 delay 1000 帧 ≈ 5s：陀螺预热 / 模块稳定，期间不累计零偏、不积分姿态
+ *   然后 calib 400 帧 ≈ 2s：静止校准，仍不积分姿态
  *   之后进入在线跟踪 */
-#define CALIB_DELAY_SAMPLE_NUM  400
+#define CALIB_DELAY_SAMPLE_NUM  1000
 #define CALIB_SAMPLE_NUM        400
 #define GYRO_TRACK_THRES_DPS    0.5f
 #define GYRO_TRACK_THRES_SQ     (GYRO_TRACK_THRES_DPS * GYRO_TRACK_THRES_DPS)
 #define TRACK_ALPHA             0.002f
+#define CALIB_TOTAL_SAMPLE_NUM  (CALIB_DELAY_SAMPLE_NUM + CALIB_SAMPLE_NUM)
 
 void imu_bias_calib_init(imu_bias_calib_t *state)
 {
@@ -23,6 +24,35 @@ void imu_bias_calib_init(imu_bias_calib_t *state)
 uint8_t imu_bias_calib_is_done(const imu_bias_calib_t *state)
 {
     return (state != NULL) ? state->calib_phase : 0u;
+}
+
+float imu_bias_calib_progress(const imu_bias_calib_t *state)
+{
+    if (state == NULL) {
+        return 0.0f;
+    }
+    if (state->calib_phase != 0u) {
+        return 1.0f;
+    }
+
+    uint32_t done = state->calib_delay_cnt;
+    if (done >= CALIB_DELAY_SAMPLE_NUM) {
+        done = CALIB_DELAY_SAMPLE_NUM + (uint32_t)state->calib_sample_cnt;
+    }
+    return (float)done / (float)CALIB_TOTAL_SAMPLE_NUM;
+}
+
+uint8_t imu_bias_calib_stage(const imu_bias_calib_t *state)
+{
+    if (state == NULL) {
+        return IMU_BIAS_STAGE_WARMUP;
+    }
+    if (state->calib_phase != 0u) {
+        return IMU_BIAS_STAGE_DONE;
+    }
+    return (state->calib_delay_cnt < CALIB_DELAY_SAMPLE_NUM)
+               ? IMU_BIAS_STAGE_WARMUP
+               : IMU_BIAS_STAGE_CALIB;
 }
 
 void imu_bias_calib_update(imu_bias_calib_t *state,

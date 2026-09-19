@@ -16,15 +16,26 @@ typedef struct {
 
     float calib_acc_sum[3];
     float calib_gyro_sum[3];
-    uint16_t calib_delay_cnt;   /* 上电等待计数（约 2s @200Hz，期间不校准） */
+    uint16_t calib_delay_cnt;   /* 上电等待计数（约 5s @200Hz，期间不校准） */
     uint16_t calib_sample_cnt;  /* 校准采样计数（约 2s @200Hz） */
 
     mpu9250_sample_t prev_input;
     uint8_t calib_phase;     /* 0: 等待/校准中, 1: 完成并进入跟踪 */
 } imu_bias_calib_t;
 
+/* 启动阶段：预热 → 静止零偏 → 完成 */
+#define IMU_BIAS_STAGE_WARMUP  0u
+#define IMU_BIAS_STAGE_CALIB   1u
+#define IMU_BIAS_STAGE_DONE    2u
+
 void imu_bias_calib_init(imu_bias_calib_t *state);
 uint8_t imu_bias_calib_is_done(const imu_bias_calib_t *state);
+
+/** @brief 预热+校准总进度，0.0~1.0（完成时为 1.0） */
+float imu_bias_calib_progress(const imu_bias_calib_t *state);
+
+/** @brief 当前阶段：WARMUP / CALIB / DONE */
+uint8_t imu_bias_calib_stage(const imu_bias_calib_t *state);
 
 /**
  * @brief 更新零偏估计，并输出补偿后的样本
