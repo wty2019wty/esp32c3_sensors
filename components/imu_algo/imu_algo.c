@@ -55,7 +55,16 @@ bool imu_pipeline_process(imu_pipeline_t *pipeline,
 
     imu_filter_process(raw, &filtered, &pipeline->filter);
     imu_bias_calib_update(&pipeline->bias, &filtered, &compensated);
-    imu_attitude_update(&pipeline->attitude, &compensated, pipeline->sample_dt_sec);
+
+    /* 预热 + 静止零偏校准期间不做姿态积分，避免未补偿角速度污染航向。
+     * 校准完成首帧：将姿态归零（当前姿态为 R/P/Y 原点）后再积分。 */
+    if (imu_bias_calib_is_done(&pipeline->bias)) {
+        if (!pipeline->attitude_started) {
+            imu_attitude_reset(&pipeline->attitude);
+            pipeline->attitude_started = true;
+        }
+        imu_attitude_update(&pipeline->attitude, &compensated, pipeline->sample_dt_sec);
+    }
 
     if (out != NULL) {
         *out = compensated;

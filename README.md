@@ -174,15 +174,18 @@ Up:00:05:23 Heap:123K
      ```
      同一帧 raw → imu_filter（二阶 biquad 低通）
                → imu_bias_calib（启动零偏 + 静止跟踪）
-               → imu_attitude（Mahony 六轴，kp=1.0 / ki=0.0005）
-               → 仅输出 R/P/Y
+               → 仅在校准完成后：姿态归零 → imu_attitude（Mahony 六轴）
+               → 输出 R/P/Y
      ```
+   - **时序（200Hz）**：上电 delay 400 帧 ≈2s 陀螺预热（不积分）→ 静止校准 400 帧 ≈2s
+     （估零偏，仍不积分）→ 校准完成首帧姿态角归零 → 之后开始 Mahony 积分。
    - **参数（200Hz）**：`sample=200Hz`，`acc_cutoff=25Hz`，`gyro_cutoff=25Hz`，
      `warmup=200`；芯片 ODR `SMPLRT_DIV=4`（200Hz）；硬件 DLPF 陀螺 20Hz / 加速度 21Hz。
-   - **零偏校准**：按 `imu_bias_calib.c` 中 `CALIB_SAMPLE_NUM` 执行（当前 200 帧 @200Hz ≈ 1s），
-     完成后串口打印 `IMU 零偏校准完成`。校准只影响姿态，**不影响 A/G 上屏数值**。
+   - **零偏校准**：按 `imu_bias_calib.c` 中 `CALIB_DELAY_SAMPLE_NUM` / `CALIB_SAMPLE_NUM`
+     执行（各 400 帧 @200Hz ≈2s+2s），完成后串口打印 `IMU 零偏校准完成`。
+     校准只影响姿态，**不影响 A/G 上屏数值**。
    - 陀螺量程 **±500dps**。IMU 独立任务 200Hz。
-   - 六轴融合无磁力计参与，Yaw 会缓慢漂移。
+   - 六轴融合无磁力计参与，Yaw 为相对航向（校准完成瞬间为 0），之后仍会缓慢漂移。
 
 10. **共享数据结构**
     - `sensor_task` / `display_task` / `imu_task` 通过 `SemaphoreHandle_t` 互斥锁保护
@@ -213,7 +216,8 @@ Up:00:05:23 Heap:123K
      （`app_main` 会把该值传入各驱动 init）。
 
 4. **姿态角校准**
-   - 上电后请保持水平静止约 1s（`CALIB_SAMPLE_NUM`/采样率），便于姿态用零偏收敛。
+   - 上电后请保持水平静止约 4s（delay + calib，各约 2s @200Hz）。
+   - 预热与校准期间不做姿态积分；串口出现 `IMU 零偏校准完成` 后，R/P/Y 以当时姿态为原点归零并开始输出。
    - **不影响 A/G 显示**——这两行始终是驱动原始值；静止时 G 行仍可能看到偏置。
-   - 校准完成后陀螺零偏会在静止条件下在线跟踪，姿态更稳。
+   - 校准完成后陀螺零偏会在静止条件下在线跟踪；六轴无磁力计，Yaw 相对航向仍会缓慢漂移。
 

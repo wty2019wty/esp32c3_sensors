@@ -1,8 +1,11 @@
 /*
  * IMU 优化流水线：滤波 → 零偏补偿 → 六轴姿态
  *
- * 移植自 G:\esp32s3\stm32f103 的 Task_pm6500_Read 数据链，
- * 参数按本工程 100Hz（IMU_PERIOD_MS=10）与硬件 DLPF（陀螺 20Hz / 加速度 21Hz）调整。
+ * 时序（200Hz，见 imu_bias_calib.c）：
+ *   1) 上电 delay 400 帧 ≈ 2s：陀螺预热，滤波 warmup，不积分姿态
+ *   2) 静止校准 400 帧 ≈ 2s：估 gyro/accel 零偏，仍不积分姿态
+ *   3) 校准完成瞬间：姿态归零（当前姿态作为 R/P/Y 原点）
+ *   4) 之后：零偏补偿数据进入 Mahony 积分
  */
 #pragma once
 
@@ -16,7 +19,7 @@
 
 /* 默认参数：按 200Hz 采样设计（与 IMU_PERIOD_MS=5 对齐）
  * 截止频率略高于 100Hz 方案，仍落在硬件 DLPF（陀螺 20Hz / 加速度 21Hz）附近；
- * warmup 200 帧 ≈ 1s 直通；校准 200 帧 ≈ 1s（见 imu_bias_calib.c）。 */
+ * 滤波 warmup 200 帧 ≈ 1s 直通；零偏 delay+calib 共 800 帧 ≈ 4s。 */
 #define IMU_ALGO_DEFAULT_SAMPLE_HZ      200.0f
 #define IMU_ALGO_DEFAULT_ACC_CUTOFF_HZ  25.0f
 #define IMU_ALGO_DEFAULT_GYRO_CUTOFF_HZ 25.0f
@@ -30,6 +33,7 @@ typedef struct {
     imu_attitude_t attitude;
     float sample_dt_sec;
     bool ready;
+    bool attitude_started; /* 校准完成后已归零并开始积分 */
 } imu_pipeline_t;
 
 /**
@@ -52,7 +56,9 @@ void imu_pipeline_init(imu_pipeline_t *pipeline,
                        float att_ki);
 
 /**
- * @brief 处理一帧：滤波 → 零偏补偿 → 姿态积分
+ * @brief 处理一帧：滤波 → 零偏补偿 →（校准完成后）姿态积分
+ *
+ * 上电预热与静止校准期间不更新姿态；校准完成首帧会将姿态归零后开始积分。
  *
  * @param pipeline 流水线
  * @param raw      驱动读出的原始物理量样本
